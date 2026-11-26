@@ -68,8 +68,18 @@ EOF
         # Some base images exclude documentation during installation.
         dpkg-deb --extract "$package" "$work/unpacked"
         package_doc="$work/unpacked$package_doc"
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$package"
+        set --
+        if [ "$target" = ubuntu22.04 ]; then
+            # The package and its dependencies need only the main component.
+            cat > "$work/jammy-main.list" <<'EOF'
+deb http://archive.ubuntu.com/ubuntu/ jammy main
+deb http://archive.ubuntu.com/ubuntu/ jammy-updates main
+deb http://security.ubuntu.com/ubuntu/ jammy-security main
+EOF
+            set -- -o "Dir::Etc::sourcelist=$work/jammy-main.list" -o Dir::Etc::sourceparts=-
+        fi
+        apt-get "$@" update
+        DEBIAN_FRONTEND=noninteractive apt-get "$@" install -y --no-install-recommends "$package"
         dpkg-query -W ewsgo
         ;;
     *)
