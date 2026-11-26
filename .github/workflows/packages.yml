@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 Defilippo srls info@defilippo.org
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: Linux packages
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version: '1.27.4'
+      - name: Select package version
+        id: version
+        shell: bash
+        run: |
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            if [[ ! $GITHUB_REF_NAME =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-([a-z0-9]+(\.[a-z0-9]+)*))?$ ]]; then
+              echo 'Expected a tag like v0.1.0 or v0.1.0-alpha.1' >&2
+              exit 2
+            fi
+            version=${BASH_REMATCH[1]}
+            if [[ -n ${BASH_REMATCH[3]} ]]; then
+              version+="~${BASH_REMATCH[3]}"
+            fi
+          else
+            version="0.0.0~git.$GITHUB_RUN_NUMBER"
+          fi
+          printf 'value=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Test gateway
+        run: sh ci/check.sh
+      - name: Build package input
+        run: sh packaging/build-input.sh bin/package-input
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: package-input
+          path: bin/package-input/
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: el8
+            image: quay.io/rockylinux/rockylinux:8
+          - target: el9
+            image: quay.io/rockylinux/rockylinux:9
+          - target: el10
+            image: quay.io/rockylinux/rockylinux:10
+          - target: debian13
+            image: docker.io/library/debian:13
+          - target: ubuntu22.04
+            image: docker.io/library/ubuntu:22.04
+          - target: ubuntu24.04
+            image: docker.io/library/ubuntu:24.04
+          - target: ubuntu26.04
+            image: docker.io/library/ubuntu:26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: package-input
+          path: bin/package-input
+      - name: Build and install package
+        env:
+          TARGET: ${{ matrix.target }}
+          IMAGE: ${{ matrix.image }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          mkdir -p bin/packages
+          docker run --rm \
+            --volume "$PWD/packaging:/packaging:ro" \
+            --volume "$PWD/bin/package-input:/input:ro" \
+            --volume "$PWD/bin/packages:/out" \
+            "$IMAGE" sh /packaging/build-package.sh "$TARGET" "$VERSION" /input /out
+          (cd bin/packages && sha256sum --check SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ewsgo-${{ matrix.target }}-x86_64
+          path: bin/packages/
+          if-no-files-found: error

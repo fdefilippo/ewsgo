@@ -1,0 +1,10 @@
+/bin/
+/dist/
+__pycache__/
+*.db
+*.db-shm
+*.db-wal
+*.pem
+*.key
+.env
+/credenziali.env
