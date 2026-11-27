@@ -47,6 +47,7 @@ func parseConfig(flags *flag.FlagSet, args []string) (service.Config, error) {
 	flags.StringVar(&cfg.CertFile, "tls-cert", "", "PEM server certificate path")
 	flags.StringVar(&cfg.KeyFile, "tls-key", "", "PEM server private key path")
 	flags.StringVar(&cfg.ZimbraOrigin, "zimbra-origin", "", "HTTPS backend origin; requires frontend TLS")
+	flags.StringVar(&cfg.JMAPSessionURL, "jmap-session-url", "", "HTTPS JMAP Session URL; requires frontend TLS and a SQLite store")
 	flags.StringVar(&cfg.StorePath, "store-path", "", "SQLite file for persistent EWS mailbox projections and synchronization")
 	flags.BoolVar(&cfg.MAPISpike, "mapi-spike", false, "enable diagnostic MAPI decoding/native access; no mailbox ROP execution")
 	flags.BoolVar(&cfg.MAPISessionSpike, "mapi-session-spike", false, "enable ephemeral MAPI/HTTP contexts and Connect; mailbox ROPs require store spike")

@@ -11,6 +11,9 @@ type NativeObject struct {
 	ID, Parent ID
 	Kind       Kind
 	Revision   uint64
+	// Fingerprint identifies the observed metadata when the backend cannot
+	// supply a monotonic per-object version. Empty means unavailable.
+	Fingerprint string
 }
 
 // NativeCheckpoint separates the opaque backend cursor from the local position

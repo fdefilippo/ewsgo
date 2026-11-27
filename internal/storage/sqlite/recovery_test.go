@@ -228,6 +228,7 @@ func TestRestoreValidatesOlderArchiveBeforeMigration(t *testing.T) {
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `
 		DROP TABLE mapi_permission_members;
+		ALTER TABLE native_projection DROP COLUMN fingerprint;
 		PRAGMA user_version = 28;
 	`); err != nil {
 		t.Fatal(err)

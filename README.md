@@ -7,8 +7,7 @@
 EWSGo is an open-source gateway that exposes Exchange Web Services (EWS) and
 MAPI over HTTP to clients of other mail servers. It is written in Go. Zimbra
 is the first backend, accessed through its native SOAP and REST interfaces.
-Protocol frontends share a backend-independent core. JMAP is planned as the
-second backend.
+Protocol frontends share a backend-independent core.
 
 Developed by **Defilippo srls**. <info@defilippo.org> · <https://www.defilippo.org>
 
@@ -26,6 +25,11 @@ responses in classic Outlook, and synchronization of a mixed Zimbra Trash
 folder containing 340 messages. Initial cached synchronization can take
 longer than reopening a populated Outlook profile.
 
+The [JMAP Mail backend preview](docs/jmap.md) supports EWS synchronization,
+MIME and attachment downloads, and MIME submission when the server advertises
+JMAP Submission. MailCraft was qualified against an independent Cyrus endpoint.
+[Backend contract v1](docs/backend-contract-v1.md)
+
 The Zimbra backend includes `ewsgo-rules` for Outlook rules, receive folders
 and deferred actions. Its source and installation guide are in
 `extensions/zimbra-rules`. Install it on the Zimbra mailbox server to enable
@@ -36,17 +40,18 @@ those features.
 Install the x86-64 RPM for Enterprise Linux 8, 9 or 10, or the DEB for Debian
 13 or Ubuntu 22.04, 24.04 or 26.04 LTS. The service starts disabled.
 
-Edit `/etc/ewsgo/ewsgo.yaml` and set `listen`, `zimbra-origin`, `tls-cert`
-and `tls-key`. The `ewsgo` service account needs read access to the TLS key
-and stores its database at `/var/lib/ewsgo/ewsgo.db`.
+Edit `/etc/ewsgo/ewsgo.yaml` and set `listen`, `tls-cert`, `tls-key` and one
+backend endpoint (`zimbra-origin` or `jmap-session-url`). The `ewsgo` service
+account needs read access to the TLS key and stores its database at
+`/var/lib/ewsgo/ewsgo.db`.
 
 ```sh
 sudo systemctl enable --now ewsgo.service
 ```
 
-Point the client to `https://gateway.example.org:8443/EWS/Exchange.asmx` and
-sign in with the Zimbra account. See the [Zimbra setup guide](docs/zimbra.md)
-for TLS, Outlook and MailCraft.
+Point the EWS client to `https://gateway.example.org:8443/EWS/Exchange.asmx`
+and sign in with the backend account. [Zimbra setup](docs/zimbra.md) ·
+[JMAP setup](docs/jmap.md)
 
 ## Build from source
 

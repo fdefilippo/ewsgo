@@ -91,7 +91,7 @@ func folderObject(f Folder) core.Object {
 		props[core.WellKnown] = core.Text(name)
 	}
 	parent := core.ID("")
-	if f.Parent != "" {
+	if f.ID != "1" && f.Parent != "" {
 		parent = core.ID("f:" + f.Parent)
 	}
 	return core.Object{ID: core.ID("f:" + f.ID), Kind: core.Folder, Parent: parent, Revision: revision, Properties: props}

@@ -16,6 +16,7 @@ func TestYAMLConfigCLIOverrides(t *testing.T) {
 	contents := `listen: '127.0.0.1:8443'
 loglevel: warn
 store-path: '/var/lib/ewsgo/ews data.db'
+jmap-session-url: https://mail.example.org/.well-known/jmap
 mapi-spike: true
 `
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
@@ -26,7 +27,8 @@ mapi-spike: true
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Listen != "127.0.0.1:8443" || cfg.StorePath != "/var/lib/ewsgo/ews data.db" || cfg.MAPISpike || cfg.LogLevel != "err" {
+	if cfg.Listen != "127.0.0.1:8443" || cfg.StorePath != "/var/lib/ewsgo/ews data.db" || cfg.MAPISpike || cfg.LogLevel != "err" ||
+		cfg.JMAPSessionURL != "https://mail.example.org/.well-known/jmap" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }

@@ -72,7 +72,7 @@ func (p *nativeProjection) readMembers(ctx context.Context, tx *sql.Tx, ids []co
 		return nil, fmt.Errorf("encode native membership lookup: %w", err)
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT object_id, object_kind, parent_id, native_revision
+		SELECT object_id, object_kind, parent_id, native_revision, fingerprint
 		FROM native_projection
 		WHERE mailbox_id = ? AND object_id IN (SELECT value FROM json_each(?))
 	`, p.mailboxID, string(encoded))
@@ -82,7 +82,7 @@ func (p *nativeProjection) readMembers(ctx context.Context, tx *sql.Tx, ids []co
 	defer rows.Close()
 	for rows.Next() {
 		var member core.NativeObject
-		if err := rows.Scan(&member.ID, &member.Kind, &member.Parent, &member.Revision); err != nil {
+		if err := rows.Scan(&member.ID, &member.Kind, &member.Parent, &member.Revision, &member.Fingerprint); err != nil {
 			return nil, fmt.Errorf("scan native membership: %w", err)
 		}
 		members[member.ID] = member
@@ -146,6 +146,7 @@ func projectionIDs(observed []core.NativeObject, removed []core.ID) ([]core.ID, 
 		_, duplicate := seen[object.ID]
 		if object.ID == "" || duplicate || seen[object.Parent] ||
 			object.ID == object.Parent || object.Revision == 0 || object.Revision > math.MaxInt64 ||
+			len(object.Fingerprint) != 0 && len(object.Fingerprint) != 64 ||
 			object.Kind != core.Folder && (object.Kind != core.Message || object.Parent == "") {
 			return nil, core.ErrInvalid
 		}
@@ -160,7 +161,7 @@ func (p *nativeProjection) project(ctx context.Context, tx *sql.Tx, observed []c
 	for _, object := range observed {
 		before, exists := members[object.ID]
 		if exists && before.Kind != 0 && (before.Kind != object.Kind || before.Revision > object.Revision ||
-			before.Revision == object.Revision && before.Parent != object.Parent) {
+			before.Revision == object.Revision && before != object) {
 			return nil, core.ErrConflict
 		}
 		if exists && before == object {
@@ -175,10 +176,11 @@ func (p *nativeProjection) project(ctx context.Context, tx *sql.Tx, observed []c
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO native_projection (mailbox_id, object_id, object_kind, parent_id, native_revision)
-			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (mailbox_id, object_id) DO UPDATE SET parent_id = excluded.parent_id, native_revision = excluded.native_revision
-		`, p.mailboxID, object.ID, object.Kind, object.Parent, object.Revision); err != nil {
+			INSERT INTO native_projection (mailbox_id, object_id, object_kind, parent_id, native_revision, fingerprint)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (mailbox_id, object_id) DO UPDATE SET parent_id = excluded.parent_id,
+				native_revision = excluded.native_revision, fingerprint = excluded.fingerprint
+		`, p.mailboxID, object.ID, object.Kind, object.Parent, object.Revision, object.Fingerprint); err != nil {
 			return nil, fmt.Errorf("write native membership: %w", err)
 		}
 		events = append(events, DeltaEvent{Change: change, ObjectKind: object.Kind})

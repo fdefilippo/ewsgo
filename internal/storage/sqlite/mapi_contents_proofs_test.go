@@ -95,6 +95,7 @@ func TestMAPIUploadProofMigratesVersionTwenty(t *testing.T) {
 		DROP TABLE mapi_spooler;
 		DROP TABLE mapi_public_read_state;
 		DROP TABLE mapi_permission_members;
+		ALTER TABLE native_projection DROP COLUMN fingerprint;
 		PRAGMA user_version = 20;
 	`); err != nil {
 		t.Fatal(err)

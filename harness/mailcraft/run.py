@@ -100,6 +100,7 @@ def main():
     parser.add_argument("--url")
     parser.add_argument("--ca", default="")
     parser.add_argument("--mode", choices=["sync", "probe"], default="sync")
+    parser.add_argument("--profile", choices=["zimbra-network", "jmap-network"], default="zimbra-network")
     parser.add_argument("--store", type=Path)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
@@ -125,7 +126,7 @@ def main():
                 bad = runner(args.runner, {"url": url, "email": user}, "wrong-synthetic", mode="probe")
                 report["syntheticBadPasswordRejected"] = not bad["ok"] and bad["exitCode"] != 0 and bad["networkRequests"] > 0
                 report["ok"] &= report["syntheticBadPasswordRejected"]
-        report.update({"profile": "synthetic-network" if args.fixture else "zimbra-network", "mailcraftRevision": REVISION,
+        report.update({"profile": "synthetic-network" if args.fixture else args.profile, "mailcraftRevision": REVISION,
                        "cliVersion": subprocess.check_output([args.cli, "--version"], text=True).strip(),
                        "installedCLIRevision": "undeclared", "cliSHA256": hashlib.sha256(Path(args.cli).read_bytes()).hexdigest()})
         report["harnessSourceSHA256"] = hashlib.sha256(Path(__file__).with_name("main.rs").read_bytes()).hexdigest()

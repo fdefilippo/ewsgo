@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 29
+const schemaVersion = 30
 
 type Store struct {
 	db *sql.DB
@@ -621,6 +621,15 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			PRAGMA user_version = 29;
 		`); err != nil {
 			return fmt.Errorf("create SQLite schema version 29: %w", err)
+		}
+		fallthrough
+	case 29:
+		if _, err := tx.ExecContext(ctx, `
+			ALTER TABLE native_projection ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''
+				CHECK (length(fingerprint) IN (0, 64));
+			PRAGMA user_version = 30;
+		`); err != nil {
+			return fmt.Errorf("create SQLite schema version 30: %w", err)
 		}
 	case schemaVersion:
 	default:

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Defilippo srls info@defilippo.org
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Set the Zimbra origin and TLS paths before starting ewsgo.service.
+# Select one backend and set the TLS paths before starting ewsgo.service.
 # These settings enable EWS. See docs/zimbra.md for classic Outlook options.
 listen: "127.0.0.1:8443"
 loglevel: info
 store-path: /var/lib/ewsgo/ewsgo.db
 # zimbra-origin: https://mail.example.org
+# jmap-session-url: https://mail.example.org/.well-known/jmap
 # tls-cert: /etc/ewsgo/fullchain.pem
 # tls-key: /etc/ewsgo/key.pem

@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"ewsgo/internal/backend/jmap"
 	"ewsgo/internal/backend/zimbra"
 	"ewsgo/internal/core"
 	"ewsgo/internal/frontend/autodiscover"
@@ -30,6 +31,7 @@ type Config struct {
 	CertFile                        string
 	KeyFile                         string
 	ZimbraOrigin                    string
+	JMAPSessionURL                  string
 	StorePath                       string
 	MAPISpike                       bool
 	MAPISessionSpike                bool
@@ -71,8 +73,16 @@ func (c Config) Validate() error {
 	if _, err := ParseLogLevel(c.LogLevel); err != nil {
 		return err
 	}
-	if c.StorePath != "" && c.ZimbraOrigin == "" {
+	if c.StorePath != "" && c.ZimbraOrigin == "" && c.JMAPSessionURL == "" {
 		return errors.New("persistent store requires a backend origin")
+	}
+	if c.JMAPSessionURL != "" {
+		if c.ZimbraOrigin != "" || c.StorePath == "" || c.CertFile == "" || c.KeyFile == "" || c.OutlookLab {
+			return errors.New("JMAP requires SQLite and frontend TLS, and is exclusive with Zimbra and the Outlook lab")
+		}
+		if _, err := jmap.New(c.JMAPSessionURL, nil); err != nil {
+			return errors.New("jmap-session-url must be an HTTPS Session URL")
+		}
 	}
 	if c.MAPIPersistentReplica && (!c.MAPIStoreSpike || c.StorePath == "") {
 		return errors.New("persistent MAPI replica requires the laboratory store and a SQLite store path")
@@ -375,6 +385,20 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 			health.ServeHTTP(w, r)
 		}))
 		handler = mux
+	} else if cfg.JMAPSessionURL != "" {
+		backend, err := jmap.New(cfg.JMAPSessionURL, nil)
+		if err != nil {
+			return err
+		}
+		store, err := sqlite.Open(ctx, cfg.StorePath)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		handler, err = jmapEWS(ctx, handler, backend, store, cfg.JMAPSessionURL)
+		if err != nil {
+			return err
+		}
 	}
 	if cfg.OutlookLab {
 		handler = detailedLaboratoryTraceAtLevel(logger, handler, slog.LevelDebug, laboratoryTraceOptions{cfg.MAPIUnknownPropertyTrace, cfg.MAPISetPropertyTrace, cfg.MAPISynchronizationTrace, cfg.MAPISynchronizationOptionsTrace, cfg.MAPICreateFolderTrace, cfg.MAPISetListTrace, cfg.MAPICalendarReferenceSetTrace})

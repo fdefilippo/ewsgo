@@ -31,14 +31,14 @@ func (p *nativeProjection) Baseline(ctx context.Context) (core.NativeBaseline, e
 
 func (p *nativeProjection) baselineObjects(ctx context.Context, tx *sql.Tx, legacy bool) ([]core.NativeObject, error) {
 	query := `
-		SELECT object_id, object_kind, parent_id, native_revision
+		SELECT object_id, object_kind, parent_id, native_revision, fingerprint
 		FROM native_projection WHERE mailbox_id = ?`
 	args := []any{p.mailboxID}
 	if legacy {
 		// Latest live journal rows also survive compaction. Their native
 		// metadata is unknown until the backend observes the object.
 		query = `
-			SELECT j.object_id, 0, j.parent_id, 0
+			SELECT j.object_id, 0, j.parent_id, 0, ''
 			FROM journal AS j
 			WHERE j.mailbox_id = ? AND j.kind != ? AND NOT EXISTS (
 				SELECT 1 FROM journal AS newer
@@ -55,7 +55,7 @@ func (p *nativeProjection) baselineObjects(ctx context.Context, tx *sql.Tx, lega
 	var objects []core.NativeObject
 	for rows.Next() {
 		var object core.NativeObject
-		if err := rows.Scan(&object.ID, &object.Kind, &object.Parent, &object.Revision); err != nil {
+		if err := rows.Scan(&object.ID, &object.Kind, &object.Parent, &object.Revision, &object.Fingerprint); err != nil {
 			return nil, fmt.Errorf("scan native baseline object: %w", err)
 		}
 		objects = append(objects, object)
