@@ -7,10 +7,29 @@ credentials presented by the client.
 
 ## Gateway
 
-Use an HTTPS origin for Zimbra. Import the Zimbra issuer CA into the gateway
-host's trust store when using a private CA. Give the gateway a certificate
-trusted by the clients and a private directory writable by its service user
-for the SQLite database.
+The RPM and DEB packages install `/etc/ewsgo/ewsgo.yaml` and `ewsgo.service`.
+Edit the YAML to set the listen address, Zimbra HTTPS origin and TLS file
+paths. Import a private Zimbra issuer CA into the gateway host's trust store
+if needed. Keep the TLS private key readable by the `ewsgo` service user
+(for example `root:ewsgo` with mode `0640`). Use a certificate trusted by
+the clients. Store mailbox credentials in the client as usual.
+
+The packaged service runs as `ewsgo` and stores SQLite state at
+`/var/lib/ewsgo/ewsgo.db`. That directory is private to the service user.
+The service can write there. An alternate state directory outside
+`/var/lib/ewsgo` needs appropriate ownership and a systemd `ReadWritePaths`
+override. Use absolute paths in the YAML. Upgrades preserve a locally
+modified configuration and the SQLite state.
+
+Enable and start the service after editing the template.
+
+```sh
+sudo systemctl enable --now ewsgo.service
+```
+
+To run the same configuration directly, use `ewsgo -config /etc/ewsgo/ewsgo.yaml`.
+Explicit CLI flags override YAML entries. The original flags work without a
+configuration file, for example when running a standalone binary.
 
 ```sh
 ewsgo -listen 0.0.0.0:8443 \
@@ -31,24 +50,37 @@ For a dedicated test domain, point `autodiscover.example.org` and
 certificate valid for both names and a permanent deployment UUID. Keep the
 UUID and the SQLite database when restarting the gateway.
 
-```sh
-ewsgo -listen 0.0.0.0:443 \
-  -tls-cert /etc/ewsgo/fullchain.pem -tls-key /etc/ewsgo/key.pem \
-  -zimbra-origin https://mail.example.org \
-  -store-path /var/lib/ewsgo/ewsgo.db \
-  -public-origin https://gateway.example.org \
-  -deployment-id REPLACE_WITH_A_STABLE_UUID \
-  -outlook-lab -outlook-profile-spike -mapi-spike \
-  -mapi-session-spike -mapi-store-spike -mapi-persistent-replica \
-  -nspi-bind-spike -nspi-directory-spike \
-  -mapi-hierarchy-download-spike -mapi-contents-download-spike \
-  -mapi-contents-table-spike -mapi-fai-collector-spike \
-  -mapi-drafts-reference-spike -mapi-ost-property-spike \
-  -mapi-hierarchy-import -mapi-read-state-import -mapi-folder-aggregates \
-  -mapi-contacts-metadata-spike -mapi-calendar-metadata-spike
+```yaml
+listen: "0.0.0.0:443"
+tls-cert: /etc/ewsgo/fullchain.pem
+tls-key: /etc/ewsgo/key.pem
+zimbra-origin: https://mail.example.org
+store-path: /var/lib/ewsgo/ewsgo.db
+public-origin: https://gateway.example.org
+deployment-id: REPLACE_WITH_A_STABLE_UUID
+outlook-lab: true
+outlook-profile-spike: true
+mapi-spike: true
+mapi-session-spike: true
+mapi-store-spike: true
+mapi-persistent-replica: true
+nspi-bind-spike: true
+nspi-directory-spike: true
+mapi-hierarchy-download-spike: true
+mapi-contents-download-spike: true
+mapi-contents-table-spike: true
+mapi-fai-collector-spike: true
+mapi-drafts-reference-spike: true
+mapi-ost-property-spike: true
+mapi-hierarchy-import: true
+mapi-read-state-import: true
+mapi-folder-aggregates: true
+mapi-contacts-metadata-spike: true
+mapi-calendar-metadata-spike: true
 ```
 
-Run under a dedicated OS user with permission to bind port 443. Create a new
+The packaged service can bind port 443 as `ewsgo`. Restart the service after
+editing the YAML. Create a new
 classic Outlook profile, add the test address as Microsoft Exchange, and
 verify Inbox before testing writes. The optional `ewsgo-rules` extension is
 installed on the Zimbra mailbox server. Its source and build instructions

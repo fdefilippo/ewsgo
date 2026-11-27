@@ -1,0 +1,18 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Defilippo srls info@defilippo.org
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+set -eu
+if [ "$1" = configure ]; then
+    if ! getent group ewsgo >/dev/null; then
+        addgroup --quiet --system ewsgo
+    fi
+    if ! getent passwd ewsgo >/dev/null; then
+        adduser --quiet --system --ingroup ewsgo --home /var/lib/ewsgo \
+            --no-create-home --shell /usr/sbin/nologin ewsgo
+    fi
+    install -d -m 0700 -o ewsgo -g ewsgo /var/lib/ewsgo
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+fi

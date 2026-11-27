@@ -24,12 +24,14 @@ trap 'rm -rf "$work"' EXIT
 # shellcheck disable=SC1091
 . /etc/os-release
 package_doc=/usr/share/doc/ewsgo
+unit_dir=/usr/lib/systemd/system
 case "$target:$ID:$VERSION_ID" in
     el8:rocky:8.*|el9:rocky:9.*|el10:rocky:10.*)
         dnf -y install rpm-build
         rpmbuild -bb --target x86_64 \
             --define "_topdir $work" \
             --define "input_dir $input" \
+            --define "packaging_dir $packaging" \
             --define "package_version $version" \
             --define "dist .$target" \
             "$packaging/ewsgo.spec"
@@ -42,6 +44,16 @@ case "$target:$ID:$VERSION_ID" in
         doc="$root/usr/share/doc/ewsgo"
         install -d "$root/DEBIAN" "$doc"
         install -Dm755 "$input/ewsgo" "$root/usr/bin/ewsgo"
+        if [ "$target" = ubuntu22.04 ]; then
+            # Jammy still supports systems with a separate /lib.
+            unit_dir=/lib/systemd/system
+        fi
+        install -Dm644 "$packaging/ewsgo.service" "$root$unit_dir/ewsgo.service"
+        install -Dm644 "$packaging/ewsgo.yaml" "$root/etc/ewsgo/ewsgo.yaml"
+        printf '%s\n' /etc/ewsgo/ewsgo.yaml > "$root/DEBIAN/conffiles"
+        for script in postinst prerm postrm; do
+            install -m755 "$packaging/deb-$script" "$root/DEBIAN/$script"
+        done
         install -m644 "$input/README.md" "$input/README.it.md" "$doc/"
         install -m644 "$input/LICENSE" "$doc/LICENSE"
         cp -rf "$input/assets" "$input/docs" "$doc/"
@@ -58,7 +70,7 @@ Section: mail
 Priority: optional
 Architecture: amd64
 Maintainer: Defilippo srls <info@defilippo.org>
-Depends: ca-certificates
+Depends: ca-certificates, adduser, init-system-helpers
 Description: EWS and MAPI over HTTP gateway for mail servers
  EWSGo connects compatible clients to a configurable mail backend.
  The first backend uses the native Zimbra SOAP and REST interfaces.
@@ -90,6 +102,11 @@ esac
 
 /usr/bin/ewsgo -help > "$work/help" 2>&1
 grep -q -- '-zimbra-origin' "$work/help"
+grep -q -- '-config' "$work/help"
+cmp "$unit_dir/ewsgo.service" "$packaging/ewsgo.service"
+cmp /etc/ewsgo/ewsgo.yaml "$packaging/ewsgo.yaml"
+test "$(stat -c '%a %U %G' /var/lib/ewsgo)" = '700 ewsgo ewsgo'
+test ! -e /etc/systemd/system/multi-user.target.wants/ewsgo.service
 cmp "$package_doc/LICENSE" "$input/LICENSE"
 cmp "$package_doc/README.md" "$input/README.md"
 cmp "$package_doc/README.it.md" "$input/README.it.md"

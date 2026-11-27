@@ -31,33 +31,36 @@ and deferred actions. Its source and installation guide are in
 `extensions/zimbra-rules`. Install it on the Zimbra mailbox server to enable
 those features.
 
-## Quick start
+## Install and start from a package
 
-Install the RPM for Enterprise Linux 8, 9 or 10, or the DEB for Debian 13 or
-Ubuntu 22.04, 24.04 or 26.04 LTS when available. The initial packages target
-x86-64 and install the `ewsgo` executable. To build from source, use Go
-1.27.4 or later and run `make build`. Use `./bin/ewsgo` in the commands below
-if running from the build directory.
+Install the x86-64 RPM for Enterprise Linux 8, 9 or 10, or the DEB for Debian
+13 or Ubuntu 22.04, 24.04 or 26.04 LTS. The service starts disabled.
+
+Edit `/etc/ewsgo/ewsgo.yaml` and set `listen`, `zimbra-origin`, `tls-cert`
+and `tls-key`. The `ewsgo` service account needs read access to the TLS key
+and stores its database at `/var/lib/ewsgo/ewsgo.db`.
 
 ```sh
-ewsgo -listen 127.0.0.1:8080
+sudo systemctl enable --now ewsgo.service
+```
+
+Point the client to `https://gateway.example.org:8443/EWS/Exchange.asmx` and
+sign in with the Zimbra account. See the [Zimbra setup guide](docs/zimbra.md)
+for TLS, Outlook and MailCraft.
+
+## Build from source
+
+Use Go 1.27.4 or later. Start a local process to check liveness.
+
+```sh
+make build
+./bin/ewsgo -listen 127.0.0.1:8080
 # In another terminal
 curl --fail http://127.0.0.1:8080/health/live
 ```
 
-To enable EWS, use a trusted HTTPS Zimbra origin, a certificate for the
-gateway, and a writable directory for its SQLite state.
-
-```sh
-ewsgo -listen 0.0.0.0:8443 \
-  -tls-cert /path/to/fullchain.pem -tls-key /path/to/key.pem \
-  -zimbra-origin https://mail.example.org -store-path ./ewsgo.db
-```
-
-Point the client to `https://gateway.example.org:8443/EWS/Exchange.asmx` and
-sign in with the Zimbra account. Outlook uses a separate MAPI/HTTP profile.
-See the [Zimbra setup guide](docs/zimbra.md) for Outlook, MailCraft and the
-gateway options.
+For standalone EWS operation, pass the YAML file with `-config` or supply
+the gateway options directly as flags.
 
 Run `make check` to verify formatting, run static checks and tests, and build
 the binaries. The checks require Go, a C compiler for the race detector, and

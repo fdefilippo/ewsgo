@@ -31,33 +31,37 @@ di ricezione e le azioni differite. I sorgenti e la guida di installazione
 sono in `extensions/zimbra-rules`. Installa l’estensione sul server mailbox
 di Zimbra per abilitare queste funzioni.
 
-## Avvio rapido
+## Installazione e avvio da pacchetto
 
-Quando disponibili, installa il pacchetto RPM per Enterprise Linux 8, 9 o 10
-oppure il DEB per Debian 13 o Ubuntu 22.04, 24.04 o 26.04 LTS. I primi
-pacchetti sono per x86-64 e installano l’eseguibile `ewsgo`. Per compilare dai
-sorgenti, usa Go 1.27.4 o successivo ed esegui `make build`. Usa
-`./bin/ewsgo` nei comandi seguenti se lavori dalla directory di build.
+Installa il pacchetto x86-64 RPM per Enterprise Linux 8, 9 o 10 o il DEB
+per Debian 13 o Ubuntu 22.04, 24.04 o 26.04 LTS. Il servizio è inizialmente
+disabilitato.
+
+Imposta `listen`, `zimbra-origin`, `tls-cert` e `tls-key` in
+`/etc/ewsgo/ewsgo.yaml`. L’utente di servizio `ewsgo` deve poter leggere la
+chiave TLS e salva il database in `/var/lib/ewsgo/ewsgo.db`.
 
 ```sh
-ewsgo -listen 127.0.0.1:8080
+sudo systemctl enable --now ewsgo.service
+```
+
+Configura il client su `https://gateway.example.org:8443/EWS/Exchange.asmx`
+e accedi con l’account Zimbra. Consulta la [guida Zimbra](docs/zimbra.md)
+per TLS, Outlook e MailCraft.
+
+## Compilazione dai sorgenti
+
+Usa Go 1.27.4 o successivo. Avvia un processo locale per verificarne lo stato.
+
+```sh
+make build
+./bin/ewsgo -listen 127.0.0.1:8080
 # In un altro terminale
 curl --fail http://127.0.0.1:8080/health/live
 ```
 
-Per abilitare EWS, usa un’origine HTTPS Zimbra attendibile, un certificato
-per il gateway e una directory scrivibile per lo stato SQLite.
-
-```sh
-ewsgo -listen 0.0.0.0:8443 \
-  -tls-cert /percorso/fullchain.pem -tls-key /percorso/key.pem \
-  -zimbra-origin https://mail.example.org -store-path ./ewsgo.db
-```
-
-Configura il client su `https://gateway.example.org:8443/EWS/Exchange.asmx`
-e accedi con l’account Zimbra. Outlook usa un profilo MAPI/HTTP separato.
-La [guida Zimbra](docs/zimbra.md) descrive la configurazione di Outlook,
-MailCraft e del gateway.
+Per avviare EWS direttamente, passa il file YAML con `-config` oppure
+imposta le opzioni del gateway da riga di comando.
 
 Esegui `make check` per verificare la formattazione, eseguire i controlli
 statici e i test e compilare i binari. Servono Go, un compilatore C per il
