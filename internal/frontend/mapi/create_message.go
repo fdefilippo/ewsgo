@@ -59,6 +59,12 @@ func createStoreMessage(ctx context.Context, session core.Session, state *contex
 				message.mid, message.mailDraft = draft.mid, draft
 			}
 		}
+		if store.calendarMetadata && errors.Is(err, core.ErrUnsupported) {
+			message.appointmentDraft, err = store.stageNewAppointment(ctx, session, op.Folder)
+			if errors.Is(err, core.ErrNotFound) {
+				err = core.ErrUnsupported
+			}
+		}
 		if store.contactsMetadata && errors.Is(err, core.ErrUnsupported) {
 			message.contactDraft, err = store.stageNewContact(ctx, session, op.Folder)
 			if errors.Is(err, core.ErrNotFound) {
@@ -74,6 +80,7 @@ func createStoreMessage(ctx context.Context, session core.Session, state *contex
 		message.draft.close()
 		message.mailDraft.close()
 		message.contactDraft.close()
+		message.appointmentDraft.close()
 		return fail(0x8007000e)
 	}
 	objects.objects[handle] = serverObject{

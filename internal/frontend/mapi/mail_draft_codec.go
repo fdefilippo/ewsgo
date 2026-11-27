@@ -26,7 +26,7 @@ func (s *ramStore) isDefaultSentServerID(raw []byte) bool {
 // client-specific metadata. Consume documented wire types so that an unknown
 // property can get its own error without rejecting the rest of the batch.
 func parseMailDraftSet(r *reader) (faiSetRequest, error) {
-	return parseMessageSetValues(r, readMailDraftSetValue)
+	return parseMailImportSet(r)
 }
 
 func parseMessageSetValues(r *reader, readValue func(*reader, uint32) (core.Value, error)) (faiSetRequest, error) {
@@ -62,7 +62,7 @@ func parseMailImportSet(r *reader) (faiSetRequest, error) {
 		id := tag >> 16
 		kind := uint16(tag)
 		named := id >= 0x8000 && id <= 0xfffe
-		appointment := !named && appointmentImportProperty(fixedContentsProperty(tag))
+		appointment := !named && (appointmentImportProperty(fixedContentsProperty(tag)) || tag == meetingResponseRequestedTag)
 		if kind == 0x001f && (importedMailPropertyTag(tag) || appointment ||
 			contactFields[core.Key{ID: id}] != "" || named) {
 			value, err := createFolderString(r, len(r.data)-r.pos)
@@ -74,7 +74,7 @@ func parseMailImportSet(r *reader) (faiSetRequest, error) {
 			named && contentsScalarType(kind) {
 			return readContentsValue(r, kind)
 		}
-		return readMailDraftSetValue(r, tag)
+		return readContactSetValue(r, tag)
 	})
 }
 
@@ -84,7 +84,7 @@ func readMailDraftSetValue(r *reader, tag uint32) (core.Value, error) {
 		value, err := createFolderString(r, len(r.data)-r.pos)
 		return core.Text(value), err
 	}
-	if tag == 0x0e070003 || mailDraftSetTag(tag) || draftAttachmentTag(tag) {
+	if tag == 0x0e070003 || mailDraftSetTag(tag) || draftAttachmentTag(tag) || calendarExceptionAttachmentTag(tag) {
 		return readContentsValue(r, kind)
 	}
 	if kind == 0x00fb {

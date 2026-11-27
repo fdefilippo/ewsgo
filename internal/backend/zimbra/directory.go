@@ -18,6 +18,7 @@ var galUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 type GALEntry struct {
 	AccountID, Address, DisplayName string
 	entryType                       string
+	mailUser                        bool
 }
 
 func (GALEntry) String() string { return "Zimbra GAL entry [private fields redacted]" }
@@ -50,11 +51,17 @@ func (s *Session) GAL(ctx context.Context) ([]GALEntry, error) {
 		}
 		fields := make(map[string]string)
 		uniqueType := true
+		accountClass, resourceClass := false, false
 		for _, a := range cn.Children {
 			if a.XMLName.Space != accountNS || a.XMLName.Local != "a" {
 				continue // Unused native group membership metadata.
 			}
 			key := a.get("n")
+			if key == "objectClass" {
+				accountClass = accountClass || strings.EqualFold(a.Text, "zimbraAccount")
+				resourceClass = resourceClass || strings.EqualFold(a.Text, "zimbraCalendarResource")
+				continue
+			}
 			if key != "zimbraId" && key != "email" && key != "fullName" && key != "type" {
 				continue
 			}
@@ -76,7 +83,8 @@ func (s *Session) GAL(ctx context.Context) ([]GALEntry, error) {
 		if !uniqueType {
 			entryType = "ambiguous"
 		}
-		out = append(out, GALEntry{id, address, fields["fullName"], entryType})
+		mailUser := accountClass && !resourceClass && (entryType == "" || entryType == "account")
+		out = append(out, GALEntry{id, address, fields["fullName"], entryType, mailUser})
 		if len(out) > core.MaxDirectoryEntries {
 			return nil, ErrLimit
 		}
@@ -95,7 +103,7 @@ func (d nativeDirectory) Entries(ctx context.Context) ([]core.DirectoryEntry, er
 	}
 	out := make([]core.DirectoryEntry, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, core.DirectoryEntry{Identity: core.Identity{Scope: core.Scope{Backend: "zimbra", Account: e.AccountID}, Name: e.Address}, DisplayName: e.DisplayName})
+		out = append(out, core.DirectoryEntry{Identity: core.Identity{Scope: core.Scope{Backend: "zimbra", Account: e.AccountID}, Name: e.Address}, DisplayName: e.DisplayName, MailUser: e.mailUser})
 	}
 	return out, nil
 }

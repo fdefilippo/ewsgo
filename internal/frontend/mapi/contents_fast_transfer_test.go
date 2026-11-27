@@ -146,7 +146,7 @@ func syntheticContentsChange(t *testing.T, f *hierarchyFixture, box *messageFixt
 	box.objects[0].MIME = []byte("From: sender@example.invalid\r\nSubject: Synthetic complete subject\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nComplete plain 😀\r\n--b\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=synthetic.bin\r\nContent-Transfer-Encoding: base64\r\n\r\nAAECAw==\r\n--b--\r\n")
 	box.objects[0].Recipients = []core.Recipient{{Kind: core.RecipientCc, Address: "recipient@example.invalid", DisplayName: "Synthetic recipient"}}
 	row := messageObserve(t, f, Inbox).messages[0]
-	change, err := f.store.projectContentsRow(row)
+	change, err := f.store.projectContentsRow(row, core.Identity{})
 	if err != nil {
 		t.Fatal("project message", err)
 	}
@@ -235,7 +235,7 @@ func TestContentsFastTransferEmbeddedMail(t *testing.T) {
 	f, box := messageFixture(t)
 	box.objects[0].MIME = []byte(embeddedMailFixture)
 	row := messageObserve(t, f, Inbox).messages[0]
-	change, err := f.store.projectContentsRow(row)
+	change, err := f.store.projectContentsRow(row, core.Identity{})
 	if err != nil {
 		t.Fatal("project embedded mail:", err)
 	}
@@ -457,7 +457,7 @@ func TestContentsFastTransferFAINamedDefinitionsOrderAndProviderExclusions(t *te
 		t.Fatal(err)
 	}
 	defer observation.close()
-	fai, err := f.store.projectContentsRow(observation.snapshot.messages[0])
+	fai, err := f.store.projectContentsRow(observation.snapshot.messages[0], core.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}

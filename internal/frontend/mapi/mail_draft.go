@@ -38,6 +38,7 @@ type mailDraft struct {
 	fid, mid                   uint64
 	folder                     core.ID
 	ref                        string
+	meeting                    meetingMailDraft
 	staged                     core.Object
 	rows                       map[uint32]core.Recipient
 	attachmentNumbers          []uint32
@@ -158,7 +159,12 @@ func (s *ramStore) editMailDraft(ctx context.Context, session core.Session, row 
 	for i, recipient := range object.Recipients {
 		rows[uint32(i)] = recipient
 	}
-	return &mailDraft{store: s, fid: row.parent, mid: row.mid, folder: folder, staged: object, rows: rows, lease: lease, outbox: s.outboxFID() == row.parent}, nil
+	draft := &mailDraft{store: s, fid: row.parent, mid: row.mid, folder: folder, staged: object, rows: rows, lease: lease, outbox: s.outboxFID() == row.parent}
+	if err := draft.loadMeeting(ctx); err != nil {
+		draft.close()
+		return nil, err
+	}
+	return draft, nil
 }
 
 func (d *mailDraft) close() {
@@ -211,7 +217,7 @@ func (d *mailDraft) authorize(ctx context.Context, session core.Session) error {
 }
 
 func (d *mailDraft) row() messageRow {
-	return messageRow{mid: d.mid, parent: d.fid, sourceKey: d.store.hierarchyXID(d.mid), object: d.staged}
+	return messageRow{mid: d.mid, parent: d.fid, sourceKey: d.store.hierarchyXID(d.mid), object: d.meetingObject()}
 }
 
 func (d *mailDraft) editable() error {
@@ -256,6 +262,7 @@ func (d *mailDraft) set(ctx context.Context, session core.Session, values faiSet
 	var text, html *string
 	htmlCharset := "utf-8"
 	changed := false
+	meeting := d.meeting
 	for _, v := range values {
 		if v.tag == messageInternetCP {
 			code := v.value.(core.Integer)
@@ -265,6 +272,12 @@ func (d *mailDraft) set(ctx context.Context, session core.Session, values faiSet
 		}
 	}
 	for i, v := range values {
+		if code, handled := meeting.set(&d.store.named, v); handled {
+			if code != 0 {
+				problems = append(problems, faiPropertyProblem{index: uint16(i), tag: v.tag, code: code})
+			}
+			continue
+		}
 		var problem uint32
 		switch v.tag {
 		case 0x0037001f, 0x003d001f, 0x0e1d001f:
@@ -292,9 +305,7 @@ func (d *mailDraft) set(ctx context.Context, session core.Session, values faiSet
 			}
 			html = &value
 		case 0x001a001f:
-			if v.value != core.Text("IPM.Note") {
-				problem = NotSupported
-			}
+			problem = NotSupported
 		case 0x0e070003:
 			// Unsent and read state are projected from the native draft.
 			if v.value.(core.Integer) & ^core.Integer(0x0000000b) != 0 {
@@ -340,6 +351,14 @@ func (d *mailDraft) set(ctx context.Context, session core.Session, values faiSet
 			return nil, err
 		}
 		d.staged.Properties[core.Subject] = subject
+	}
+	if meeting != d.meeting {
+		if meeting.Class != "" {
+			// A change to the transport properties must reach the durable draft
+			// even when the editable MIME did not change.
+			d.dirty = true
+		}
+		d.meeting = meeting
 	}
 	return problems, nil
 }
@@ -445,6 +464,11 @@ func (d *mailDraft) save(ctx context.Context, session core.Session, flags byte) 
 	var saved core.Object
 	var err error
 	id := d.staged.ID
+	if d.meeting.Class != "" {
+		if err := d.persistMeeting(ctx); err != nil {
+			return 0, err
+		}
+	}
 	if id == "" {
 		if err := store.setDraftDispatched(ctx, d.ref, true); err != nil {
 			return 0, err

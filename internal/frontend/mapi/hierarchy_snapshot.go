@@ -45,6 +45,7 @@ type hierarchyFolder struct {
 	name            string
 	containerClass  string // Classes declared by the projection.
 	search          bool
+	distinguished   bool
 	hidden          *bool // Present when set in the MAPI folder metadata.
 	referenceFIDs   [metadataFolderRoleCount]uint64
 	junkFID         uint64
@@ -68,6 +69,7 @@ type hierarchyNode struct {
 	name           string
 	containerClass string
 	search         bool
+	distinguished  bool
 	hidden         *bool
 	references     [metadataFolderRoleCount]folderKey
 	junk           folderKey
@@ -113,12 +115,16 @@ func (s *ramStore) observeHierarchyLocked(ctx context.Context, session core.Sess
 	if err := hierarchyOwner(ctx, box); err != nil {
 		return hierarchySnapshot{}, err
 	}
-	root, err := box.Get(ctx, s.root)
-	if err != nil {
-		return hierarchySnapshot{}, err
-	}
-	if root.ID != s.root || root.Kind != core.Folder {
-		return hierarchySnapshot{}, core.ErrInvalid
+	// An authoritative tree includes the readable root. An ordinary Query
+	// may expose metadata without granting a separate read of the root.
+	if _, complete := box.(core.OwnFolderTreeReader); !complete {
+		root, err := box.Get(ctx, s.root)
+		if err != nil {
+			return hierarchySnapshot{}, err
+		}
+		if root.ID != s.root || root.Kind != core.Folder {
+			return hierarchySnapshot{}, core.ErrInvalid
+		}
 	}
 	catalog, objects, err := readPrivateFolderTreeWithSpecialFolders(ctx, session, s.calendarMetadata, s.contactsMetadata, s.tasksMetadata)
 	if err != nil {
@@ -292,6 +298,7 @@ func nativeHierarchyNode(object core.Object, root core.ID, drafts bool) (hierarc
 	}
 	n.counts = counts
 	n.containerClass = nativeFolderClass(object.Properties, drafts)
+	n.distinguished = object.Properties[core.WellKnown] != nil
 	if object.ID == root {
 		n.parent = folderKey{role: MailboxRoot}
 	}
@@ -534,7 +541,7 @@ func (s *ramStore) commitHierarchy(ctx context.Context, nodes []hierarchyNode, a
 		}
 		descendants[n.key] = true
 		fid, parent, v := byKey[n.key], byKey[n.parent], versions[n.key]
-		f := hierarchyFolder{native: n.key.native, fid: fid, parent: parent, sourceKey: s.hierarchyXID(fid), changeKey: v.change, predecessors: []byte(v.history), cn: v.cn, creator: v.creator, modified: v.observed, name: n.name, containerClass: n.containerClass, search: n.search, hidden: n.hidden, counts: n.counts}
+		f := hierarchyFolder{native: n.key.native, fid: fid, parent: parent, sourceKey: s.hierarchyXID(fid), changeKey: v.change, predecessors: []byte(v.history), cn: v.cn, creator: v.creator, modified: v.observed, name: n.name, containerClass: n.containerClass, search: n.search, distinguished: n.distinguished, hidden: n.hidden, counts: n.counts}
 		if n.junk.native != "" {
 			f.junkFID, f.additionalRefs = byKey[n.junk], n.additionalRefs
 		}

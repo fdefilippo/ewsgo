@@ -97,7 +97,7 @@ func (s *ramStore) writeCopiedFolder(ctx context.Context, session core.Session, 
 	if err != nil {
 		return err
 	}
-	err = s.writeCopiedFolderMessages(ctx, source, stream, associated.snapshot.messages, folder.native)
+	err = s.writeCopiedFolderMessages(ctx, session.Identity(), source, stream, associated.snapshot.messages, folder.native)
 	associated.close()
 	if err != nil {
 		return err
@@ -106,14 +106,14 @@ func (s *ramStore) writeCopiedFolder(ctx context.Context, session core.Session, 
 	if err != nil {
 		return err
 	}
-	if err := s.writeCopiedFolderMessages(ctx, source, stream, normal.messages, folder.native); err != nil {
+	if err := s.writeCopiedFolderMessages(ctx, session.Identity(), source, stream, normal.messages, folder.native); err != nil {
 		return err
 	}
 	stream.word(0x400b0003) // EndFolder.
 	return stream.err
 }
 
-func (s *ramStore) writeCopiedFolderMessages(ctx context.Context, source serverObject, stream *fastTransfer, rows []messageRow, anchor core.ID) error {
+func (s *ramStore) writeCopiedFolderMessages(ctx context.Context, identity core.Identity, source serverObject, stream *fastTransfer, rows []messageRow, anchor core.ID) error {
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -121,7 +121,7 @@ func (s *ramStore) writeCopiedFolderMessages(ctx context.Context, source serverO
 		if row.object.Parent != anchor {
 			return core.ErrConflict
 		}
-		if err := s.writeCopiedMessage(stream, source, row, false); err != nil {
+		if err := s.writeCopiedMessage(stream, source, row, identity, false); err != nil {
 			return err
 		}
 	}

@@ -118,7 +118,7 @@ func skipRuleRestriction(r *reader, depth int) error {
 			return r.err
 		}
 		return skipRuleRestriction(r, depth+1)
-	case 10, 12: // Comment and compatibility Annotation encodings.
+	case 10, 12: // Comment, Gromox Annotation.
 		count := r.take(1)
 		if count == nil {
 			return r.err
@@ -133,7 +133,7 @@ func skipRuleRestriction(r *reader, depth int) error {
 		if present != nil && present[0] != 0 {
 			return skipRuleRestriction(r, depth+1)
 		}
-	case 0xff: // Compatibility null restriction encoding.
+	case 0xff: // Gromox null restriction.
 	default:
 		return ErrUnsupported
 	}

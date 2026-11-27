@@ -301,16 +301,12 @@ func putContactEmails(props core.Properties, contact core.Contact) {
 		if display == "" {
 			display = address
 		}
-		entry := append([]byte("\x00\x00\x00\x00"+oneOffProvider), 0, 0, 1, 0x80)
-		entry = append(entry, contentsUnicode(display)...)
-		entry = append(entry, contentsUnicode("SMTP")...)
-		entry = append(entry, contentsUnicode(address)...)
 		base := uint32(0x8080 + 0x10*slot)
 		props[core.Key{Set: contactAddressSet, ID: base}] = core.Text(display)
 		props[core.Key{Set: contactAddressSet, ID: base + 2}] = core.Text("SMTP")
 		props[core.Key{Set: contactAddressSet, ID: base + 3}] = core.Text(address)
 		props[core.Key{Set: contactAddressSet, ID: base + 4}] = core.Text(address)
-		props[core.Key{Set: contactAddressSet, ID: base + 5}] = core.Binary(entry)
+		props[core.Key{Set: contactAddressSet, ID: base + 5}] = smtpOneOffEntry(display, address)
 		slots = append(slots, int32(slot))
 		mask |= 1 << slot
 	}

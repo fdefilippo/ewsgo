@@ -60,7 +60,7 @@ func (t *contentsTransfer) close() {
 	}
 }
 
-func (s *ramStore) projectContentsPayload(row messageRow) (projectedMessage, error) {
+func (s *ramStore) projectContentsPayload(row messageRow, identity core.Identity) (projectedMessage, error) {
 	if row.privateConfig {
 		return projectFreeBusyMessage(row), nil
 	}
@@ -71,7 +71,14 @@ func (s *ramStore) projectContentsPayload(row messageRow) (projectedMessage, err
 		return projectCalendarSearchItem(row)
 	}
 	if !row.associated {
-		return projectReadableMailContents(row.object)
+		p, err := projectReadableMailContents(row.object)
+		if err == nil {
+			p.bytes += s.projectMeetingDelivery(p.values, row.object, identity)
+			if p.bytes > maxMailProjectionBytes {
+				return projectedMessage{}, core.ErrUnsupported
+			}
+		}
+		return p, err
 	}
 	if _, err := s.validateFAIRecord(faiRecord{folder: row.parent, object: row.object}); err != nil {
 		return projectedMessage{}, err
@@ -99,8 +106,8 @@ func (s *ramStore) projectContentsPayload(row messageRow) (projectedMessage, err
 	return p, nil
 }
 
-func (s *ramStore) projectContentsRow(row messageRow) (contentsChange, error) {
-	p, err := s.projectContentsPayload(row)
+func (s *ramStore) projectContentsRow(row messageRow, identity core.Identity) (contentsChange, error) {
+	p, err := s.projectContentsPayload(row, identity)
 	if err != nil {
 		return contentsChange{}, err
 	}

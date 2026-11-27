@@ -46,9 +46,18 @@ func singleAppointmentImport(values contentsValues) (core.Appointment, error) {
 	state, _ := named(appointmentStateFlags, 0x0003).(core.Integer)
 	recurrence, _ := named(appointmentRecurType, 0x0003).(core.Integer)
 	allDay := named(appointmentAllDay, 0x000b) == core.Bool(true)
-	if !strings.EqualFold(string(class), "IPM.Appointment") || flags&(16|32|64) != 0 || state != 0 ||
+	if flags&(16|32|64) != 0 {
+		return core.Appointment{}, appointmentImportRejection{importAppointmentSaveMessageFlags, core.ErrUnsupported}
+	}
+	if state != 0 || named(appointmentInvited, 0x000b) == core.Bool(true) {
+		return core.Appointment{}, appointmentImportRejection{importAppointmentSaveMeetingState, core.ErrUnsupported}
+	}
+	if named(core.ReminderSet, 0x000b) == core.Bool(true) {
+		return core.Appointment{}, appointmentImportRejection{importAppointmentSaveReminder, core.ErrUnsupported}
+	}
+	if !strings.EqualFold(string(class), "IPM.Appointment") ||
 		named(core.AppointmentRecurring, 0x000b) == core.Bool(true) || recurrence != 0 ||
-		named(appointmentRecur, 0x0102) != nil || named(core.ReminderSet, 0x000b) == core.Bool(true) ||
+		named(appointmentRecur, 0x0102) != nil ||
 		fixed(0x0e1b000b) == core.Bool(true) {
 		return core.Appointment{}, appointmentImportRejection{importAppointmentSaveProfile, core.ErrUnsupported}
 	}
@@ -162,9 +171,13 @@ func (d *mailImportDraft) saveAppointment(ctx context.Context, session core.Sess
 	if d.editKey.id != "" {
 		cn, err = c.state.store.updateAppointmentImport(ctx, session, c.state.root, d, values)
 	} else {
-		item, decodeErr := singleAppointmentImport(values)
+		item, decodeErr := appointmentImportItem(values)
 		if decodeErr != nil {
-			return 0, decodeErr
+			var rejection appointmentImportRejection
+			if errors.As(decodeErr, &rejection) {
+				return 0, decodeErr
+			}
+			return 0, appointmentImportRejection{importAppointmentSaveProfile, decodeErr}
 		}
 		cn, err = c.state.store.saveAppointmentImport(ctx, session, c.state.root, d, item)
 	}
@@ -232,10 +245,7 @@ func (s *ramStore) saveAppointmentImport(ctx context.Context, session core.Sessi
 	if err != nil {
 		return 0, errors.Join(core.ErrOutcomeUnknown, err)
 	}
-	if stored.UID != uid || stored.Type != item.Type || stored.Participation != core.AppointmentPersonal ||
-		stored.AllDay != item.AllDay || stored.Recurrence != nil || stored.Cancelled ||
-		stored.Subject != item.Subject || stored.Location != item.Location || stored.Body != item.Body ||
-		!stored.Start.Equal(item.Start) || !stored.End.Equal(item.End) {
+	if !matchesCreatedAppointment(stored, item, uid) {
 		return 0, core.ErrOutcomeUnknown
 	}
 	obj, err := calendarAppointmentMessage(stored, folder.native)
@@ -254,6 +264,16 @@ func (s *ramStore) saveAppointmentImport(ctx context.Context, session core.Sessi
 		}
 	}
 	return s.publishMessageImport(ctx, p, d, obj.Revision, nodes[0].read, nodes[0].fingerprint)
+}
+
+func matchesCreatedAppointment(stored, item core.Appointment, uid string) bool {
+	return !(stored.UID != uid || stored.Type != item.Type || stored.Participation != core.AppointmentPersonal ||
+		stored.AllDay != item.AllDay || !equalAppointmentRules(item.Recurrence, stored.Recurrence) || stored.Cancelled ||
+		stored.Subject != item.Subject || stored.Location != item.Location || stored.Body != item.Body ||
+		!stored.Start.Equal(item.Start) || !stored.End.Equal(item.End) || item.SeriesSchedule != nil &&
+		(stored.SeriesSchedule == nil || !stored.SeriesSchedule.WallStart.Equal(item.SeriesSchedule.WallStart) ||
+			!stored.SeriesSchedule.WallEnd.Equal(item.SeriesSchedule.WallEnd) ||
+			len(stored.SeriesSchedule.Exceptions)+len(stored.SeriesSchedule.SkippedDates) != 0))
 }
 
 func (s *ramStore) updateAppointmentImport(ctx context.Context, session core.Session, fid uint64, d *mailImportDraft, values contentsValues) (uint64, error) {
@@ -287,7 +307,13 @@ func (s *ramStore) updateAppointmentImport(ctx context.Context, session core.Ses
 		return 0, core.ErrConflict
 	}
 	if !editablePersonalAppointment(before) {
-		return 0, appointmentImportRejection{importAppointmentSaveProfile, core.ErrUnsupported}
+		return 0, appointmentImportRejection{importAppointmentSaveNativeProfile, core.ErrUnsupported}
+	}
+	if before.Type == core.AppointmentMaster {
+		return s.updateAppointmentSeriesImport(ctx, box, d, current, before, values)
+	}
+	if len(d.files) != 0 {
+		return 0, appointmentImportRejection{importAppointmentRecurrenceAttachment, core.ErrUnsupported}
 	}
 	item, err := singleAppointmentImport(values)
 	if err != nil {
@@ -327,6 +353,10 @@ func (s *ramStore) updateAppointmentImport(ctx context.Context, session core.Ses
 		(patch.Location != nil && after.Location != *patch.Location) {
 		return 0, core.ErrOutcomeUnknown
 	}
+	return s.publishAppointmentImportEdit(ctx, d, current, before, after)
+}
+
+func (s *ramStore) publishAppointmentImportEdit(ctx context.Context, d *mailImportDraft, current messageVersion, before, after core.Appointment) (uint64, error) {
 	obj, err := calendarAppointmentMessage(after, d.folder)
 	if err != nil || obj.ID != d.editKey.id || obj.Revision < before.Identity.Revision {
 		return 0, core.ErrOutcomeUnknown

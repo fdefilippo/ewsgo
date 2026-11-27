@@ -160,10 +160,31 @@ func projectCalendarSearchItem(row messageRow) (projectedMessage, error) {
 				if text, ok := value.(core.Text); ok {
 					size += 2 * len(text)
 				}
+				if binary, ok := value.(core.Binary); ok {
+					size += len(binary)
+				}
 			}
 		}
 	}
-	return projectedMessage{values: values, bytes: size}, nil
+	result := projectedMessage{values: values, bytes: size}
+	if err := projectMessageRecipients(&result, row.object.Recipients); err != nil {
+		return projectedMessage{}, err
+	}
+	if hasCalendarRecipientRows(row) {
+		organizer := receivedMeetingOrganizer(row)
+		for index, recipient := range row.object.Recipients {
+			for i, value := range meetingRecipientValues(recipient, organizer && index == 0) {
+				putContentsValue(result.recipients[index], meetingRecipientColumns[i], value)
+				switch data := value.(type) {
+				case core.Binary:
+					result.bytes += len(data)
+				case core.Text:
+					result.bytes += 2 * len(data)
+				}
+			}
+		}
+	}
+	return result, nil
 }
 
 func calendarVariableProperty(tag uint32) bool {

@@ -25,6 +25,7 @@ const maxRAMMappings = 4096
 // preserve identifiers for reconnects.
 // No backend session, credentials or token is retained here.
 type ramStores struct {
+	namespace        Namespace
 	contents         contentsMemory
 	contactsMetadata bool
 	tasksMetadata    bool

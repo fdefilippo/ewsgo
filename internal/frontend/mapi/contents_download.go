@@ -75,8 +75,12 @@ func appointmentContentsSchema(associated bool) func(contentsProperty) bool {
 }
 
 func registerCalendarNames(ctx context.Context, names *namedPropertyRegistry) error {
-	properties := make([]propertyName, 0, len(calendarProperties))
-	for _, field := range calendarProperties {
+	return registerCalendarNamedProperties(ctx, names, calendarProperties)
+}
+
+func registerCalendarNamedProperties(ctx context.Context, names *namedPropertyRegistry, fields []calendarNamedProperty) error {
+	properties := make([]propertyName, 0, len(fields))
+	for _, field := range fields {
 		properties = append(properties, field.property.name)
 	}
 	if _, code := names.ids(ctx, properties, true); code != 0 {
@@ -188,6 +192,12 @@ func (d *contentsDownload) prepare(ctx context.Context, session core.Session, ob
 	}
 	if d.plan.special == core.CalendarFolder {
 		if err := registerCalendarNames(ctx, &object.binding.store.named); err != nil {
+			return err
+		}
+	} else if slices.ContainsFunc(prepared.delta.changes, func(change contentsChange) bool {
+		return nativeMeetingKind(change.row.object.Properties) != 0
+	}) {
+		if err := registerMeetingNames(ctx, &object.binding.store.named); err != nil {
 			return err
 		}
 	}

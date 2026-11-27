@@ -14,6 +14,41 @@ import (
 	"ewsgo/internal/core"
 )
 
+func TestMeetingCalendarProcessedRequiresLocalInitialAppointment(t *testing.T) {
+	for _, test := range []struct {
+		name, attribute, value string
+		want                   bool
+	}{
+		{name: "local initial appointment", want: true},
+		{name: "missing local folder", attribute: "ciFolder"},
+		{name: "missing appointment", attribute: "calItemId"},
+		{name: "remote appointment", attribute: "calItemId", value: "other:42"},
+		{name: "updated appointment", attribute: "seq", value: "1"},
+		{name: "organizer copy", attribute: "isOrg", value: "1"},
+		{name: "exception", attribute: "ex", value: "1"},
+		{name: "canceled appointment", attribute: "status", value: "CANC"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fields := map[string]string{"method": "REQUEST", "uid": "test-request", "calItemId": "42", "ciFolder": "10", "seq": "0"}
+			if test.attribute != "" {
+				fields[test.attribute] = test.value
+			}
+			comp := element(mailNS, "comp", "")
+			for name, value := range fields {
+				if value != "" {
+					comp = attr(comp, name, value)
+				}
+			}
+			invite := attr(element(mailNS, "inv", "", comp), "type", "appt")
+			properties := make(core.Properties)
+			projectMeetingMessage(properties, element(mailNS, "m", "", invite))
+			if got := properties[core.MeetingCalendarProcessed] == core.Bool(true); got != test.want {
+				t.Fatalf("processed classification %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRescheduleAppointmentRejectsBothSidesOfAmbiguousLocalTime(t *testing.T) {
 	original := time.Date(2027, time.March, 25, 8, 30, 0, 0, time.UTC)
 	part := attr(attr(element(mailNS, "s", ""), "d", "20270325T093000"), "tz", "Europe/Rome")
@@ -130,7 +165,7 @@ func TestAppointmentContentsProjectsDetachedOccurrence(t *testing.T) {
 	row := core.Object{ID: "a:42", Parent: "f:10", Revision: 15, Properties: core.Properties{
 		core.IsRead: core.Bool(true), core.ContentRevision: core.Integer(13), core.AppointmentRecurring: core.Bool(false),
 	}}
-	item, err := appointmentDetailForRow(row, detail)
+	item, err := appointmentDetailForRow(row, detail, "owner@example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +176,7 @@ func TestAppointmentContentsProjectsDetachedOccurrence(t *testing.T) {
 		t.Fatal("detached event lost its native identity, dates or read-only participation")
 	}
 	detail.Children = append(detail.Children, detail.Children[0])
-	if _, err := appointmentDetailForRow(row, detail); !errors.Is(err, core.ErrUnsupported) {
+	if _, err := appointmentDetailForRow(row, detail, "owner@example.test"); !errors.Is(err, core.ErrUnsupported) {
 		t.Fatalf("ambiguous masterless item returned %v", err)
 	}
 }

@@ -319,6 +319,7 @@ type mailContentMetadata struct {
 	modifiedSeconds *uint64
 	recipients      []core.Recipient
 	categories      core.Strings
+	meeting         core.Properties
 	hasCalendarPart bool
 }
 
@@ -333,6 +334,12 @@ func (m mailContentMetadata) bytes() int {
 	}
 	for _, category := range m.categories {
 		n += len(category) + 32
+	}
+	for _, value := range m.meeting {
+		n += 64
+		if text, ok := value.(core.Text); ok {
+			n += len(text)
+		}
 	}
 	return n
 }
@@ -354,6 +361,9 @@ func (m mailContentMetadata) object() core.Object {
 		object.Properties[core.LastModifiedAt] = core.Timestamp(time.Unix(int64(*m.modifiedSeconds), 0).UTC())
 	}
 	object.Recipients = m.recipients
+	for key, value := range m.meeting {
+		object.Properties[key] = value
+	}
 	return object
 }
 
@@ -396,10 +406,13 @@ func parseMailContentMetadata(response node, id string) (mailContentMetadata, er
 	if err != nil {
 		return mailContentMetadata{}, err
 	}
+	meeting := make(core.Properties)
+	projectMeetingMessage(meeting, n)
 	return mailContentMetadata{
 		message: messageFromNode(n), modifiedSeconds: values["md"],
 		recipients: recipients, categories: zimbraTagNames(n.get("tn")),
 		hasCalendarPart: hasCalendarMIMEPart(n),
+		meeting:         meeting,
 	}, nil
 }
 

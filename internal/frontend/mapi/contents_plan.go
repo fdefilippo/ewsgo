@@ -37,7 +37,7 @@ func indexSupportsContentsRestriction(n *contentsRestriction) bool {
 	return false
 }
 
-func indexedContentsPayload(row messageRow) (projectedMessage, error) {
+func (s *ramStore) indexedContentsPayload(row messageRow, identity core.Identity) (projectedMessage, error) {
 	size, ok := row.object.Properties[core.MessageSize].(core.Integer)
 	if !ok || size < 0 {
 		return projectedMessage{}, core.ErrInvalid
@@ -50,6 +50,7 @@ func indexedContentsPayload(row messageRow) (projectedMessage, error) {
 	hasAttachments := row.object.Properties[core.HasAttachments] == core.Bool(true)
 	putContentsValue(p.values, 0x0e1b000b, core.Bool(hasAttachments))
 	putContentsValue(p.values, 0x0e070003, core.Integer(mailContentsFlags(row.object, hasAttachments)))
+	p.bytes += s.projectMeetingDelivery(p.values, row.object, identity)
 	addContentsRowMetadata(&p, row)
 	return p, nil
 }
@@ -204,9 +205,9 @@ func (s *contentsState) prepareContents(ctx context.Context, session core.Sessio
 			}
 			change := contentsChange{row: row}
 			if row.indexedMIME() {
-				change.payload, err = indexedContentsPayload(row)
+				change.payload, err = s.store.indexedContentsPayload(row, session.Identity())
 			} else {
-				change, err = s.store.projectContentsRow(row)
+				change, err = s.store.projectContentsRow(row, session.Identity())
 			}
 			if err != nil {
 				return fail(contentsFailureProjection, err)

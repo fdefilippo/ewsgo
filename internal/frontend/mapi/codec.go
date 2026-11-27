@@ -458,6 +458,9 @@ func (v ROPBuffer) decodeReadStateOperations(ost, hierarchy, create, metadata, s
 			}
 			op.Output = fields[0]
 			op.OpenMessage = &openMessageRequest{codePage: binary.LittleEndian.Uint16(fields[1:3]), mode: fields[3]}
+			if calendar && attachmentObjects != nil && fields[3] != 0 {
+				provisionalDrafts[op.Output] = op.Logon
+			}
 		case ropGetMessageStatus, ropSetMessageStatus:
 			if !contents && op.ID == ropGetMessageStatus {
 				return nil, ErrUnsupported
@@ -493,7 +496,7 @@ func (v ROPBuffer) decodeReadStateOperations(ost, hierarchy, create, metadata, s
 			delete(provisionalContacts, op.Output)
 			delete(provisionalAppointments, op.Output)
 			delete(provisionalDrafts, op.Output)
-			if op.Flags == 0 && (mailDraftObjects != nil || contacts && importObjects != nil) {
+			if op.Flags == 0 && (mailDraftObjects != nil || (contacts || calendar) && importObjects != nil) {
 				objects := importObjects
 				if objects == nil {
 					objects = mailDraftObjects
@@ -981,6 +984,15 @@ func (v ROPBuffer) decodeReadStateOperations(ost, hierarchy, create, metadata, s
 			if calendar && collector && importObjects != nil {
 				object, code := importObjects.lookup(v.Handles[op.Input], op.Logon)
 				logon, provisional := provisionalAppointments[op.Input]
+				createLogon, creating := provisionalDrafts[op.Input]
+				if creating && createLogon == op.Logon {
+					values, err := parseMailImportSet(&r)
+					if err != nil {
+						return nil, setError(err)
+					}
+					op.FAISet, op.MailDraftSet, op.ContactSet = values, true, contacts
+					break
+				}
 				if provisional && logon == op.Logon || code == 0 && object.message != nil && object.message.appointmentDraft != nil {
 					values, err := parseMailImportSet(&r)
 					if err != nil {
@@ -1032,6 +1044,7 @@ func (v ROPBuffer) decodeReadStateOperations(ost, hierarchy, create, metadata, s
 				object, code := attachmentObjects.lookup(v.Handles[op.Input], op.Logon)
 				provisionalLogon, provisional := provisionalDrafts[op.Input]
 				editable := code == 0 && (mailDraftObjects != nil && object.message != nil && object.message.mailDraft != nil ||
+					object.message != nil && object.message.calendarException != nil ||
 					object.attachment != nil && object.attachment.draft != nil)
 				if provisional && provisionalLogon == op.Logon || editable {
 					values, err := parseMailDraftSet(&r)

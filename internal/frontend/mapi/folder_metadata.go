@@ -394,6 +394,50 @@ func additionalEntryIDSlots(stored []byte) ([][]byte, error) {
 	return values, nil
 }
 
+// MS-OXOSFLD identifies these optional folders by their slots in the Inbox
+// property. Only live virtual folders with the expected parent qualify:
+// a reference written by a client cannot disable sync on a native folder.
+func (b storeBinding) isSyncIssuesFolder(fid uint64) bool {
+	s := b.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := s.byFID[fid]
+	folder, ok := s.dynamic[key.dynamic]
+	if !ok || folder.softDeleted || folder.search {
+		return false
+	}
+	slots, err := additionalEntryIDSlots(s.metadata[b.fids[Inbox]][additionalEntryIDs])
+	const syncIssues = 1
+	if err != nil || len(slots) <= syncIssues {
+		return false
+	}
+	rootFID, err := parseFolderEntryID(slots[syncIssues], b.mailboxGUID, s.replica)
+	if err != nil {
+		return false
+	}
+	rootKey := s.byFID[rootFID]
+	root, ok := s.dynamic[rootKey.dynamic]
+	if !ok || root.softDeleted || root.search || root.parent != (folderKey{native: s.root}) {
+		return false
+	}
+	if fid == rootFID {
+		return true
+	}
+	if folder.parent != rootKey {
+		return false
+	}
+	// Conflicts, Local Failures and Server Failures. Junk is the next slot.
+	for _, i := range [...]int{0, 2, 3} {
+		if i < len(slots) {
+			child, err := parseFolderEntryID(slots[i], b.mailboxGUID, s.replica)
+			if err == nil && child == fid {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Called with the store mutex held. Published metadata bags are immutable.
 func (s *ramStore) unlinkRemindersFolder(fid uint64) {
 	inbox := s.byKey[folderKey{native: s.inbox}]

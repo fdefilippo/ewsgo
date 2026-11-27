@@ -80,9 +80,16 @@ Pass `--ca /path/to/issuer.pem` if the client uses a private issuer.
 
 ## Alpha limits
 
-Outlook and MailCraft CLI were tested in defined scenarios. Outlook writes
-to recurring events and Outlook actions on invitations still need
-qualification. One cached Outlook test verified 340 messages in a Zimbra
-Trash folder containing mail, contacts and appointments. Share your client and server
-versions, client mode and a short description of the scenario when
-reporting a result.
+Lab tests covered recurring series and individual occurrences, and sending,
+cancelling, accepting, tentatively accepting and declining invitations in
+classic Outlook. Cached Outlook initially populated Inbox and a mixed Trash
+folder with 340 messages. Subsequent mail in an additional test folder
+synchronized both automatically and on manual refresh. Timing varied by
+folder and by the client’s synchronization phase.
+One older invitation stayed absent from a reused Outlook cache after a
+manual refresh. The gateway exposed it over MAPI and a fresh Outlook cache
+displayed it.
+
+Deployment qualification for load, recovery and multiple gateway instances
+is still pending. Share client and server versions, client mode and a short
+description of the scenario when reporting a result.

@@ -37,13 +37,20 @@ func (m openedMessage) requireContentRevision(object core.Object) error {
 	return nil
 }
 
-// The immutable MIME view remains usable only while its parent and content
-// revision still match. This check reads the current envelope, without MIME.
+// MIME views remain usable only while their parent and content revision
+// still match. Empty appointment tables must still have no attachments.
 func (s *ramStore) authorizeAttachmentContent(ctx context.Context, session core.Session, fid uint64, message openedMessage) error {
 	if message.mailDraft != nil {
 		return message.mailDraft.authorizeAttachments(ctx, session)
 	}
+	if message.calendarException != nil {
+		return message.calendarException.authorize(ctx, session)
+	}
 	message = message.rootMessage()
+	if s.isAppointmentMID(message.mid) {
+		_, err := s.readOpenedAttachments(ctx, session, [16]byte{}, fid, message)
+		return err
+	}
 	row, err := s.readOpenedMessage(ctx, session, fid, message)
 	if err != nil {
 		return err
@@ -57,6 +64,9 @@ func (s *ramStore) authorizeAttachmentContent(ctx context.Context, session core.
 func (s *ramStore) readOpenedAttachments(ctx context.Context, session core.Session, mailboxGUID [16]byte, fid uint64, message openedMessage) ([]contentsValues, error) {
 	if message.mailDraft != nil {
 		return message.mailDraft.attachmentRows(ctx, session)
+	}
+	if message.calendarException != nil {
+		return nil, message.calendarException.authorize(ctx, session)
 	}
 	if message.embedded != nil {
 		projection, err := s.readOpenedMailProjection(ctx, session, fid, message)
@@ -76,6 +86,29 @@ func (s *ramStore) readOpenedAttachments(ctx context.Context, session core.Sessi
 		defer s.contentsMu.Unlock()
 		_, err = s.readFAIRowLocked(ctx, fid, key.id)
 		return nil, err // The FAI store does not contain attachments.
+	}
+	if key.special == core.CalendarFolder {
+		reader, ok := session.Mailbox().(core.AppointmentContentsReader)
+		if !ok {
+			return nil, core.ErrUnsupported
+		}
+		item, err := readOpenedCalendarAppointment(ctx, reader, folder, key)
+		if err != nil {
+			return nil, err
+		}
+		switch item.Type {
+		case core.AppointmentSingle:
+		case core.AppointmentMaster:
+			if item.SeriesSchedule == nil || len(item.SeriesSchedule.Exceptions) != 0 {
+				return nil, core.ErrUnsupported
+			}
+		default:
+			return nil, core.ErrUnsupported
+		}
+		if item.Identity.Properties[core.HasAttachments] != core.Bool(false) {
+			return nil, core.ErrUnsupported
+		}
+		return nil, ctx.Err()
 	}
 	object, err := readOpenedMessageMIME(ctx, session, folder, key, message)
 	if err != nil {

@@ -100,7 +100,7 @@ func openFastTransferCopyMessages(ctx context.Context, session core.Session, obj
 		if err := ctx.Err(); err != nil {
 			return reply(storeError(err))
 		}
-		if err := store.writeCopiedMessage(stream, folder, selected[mid], request.flags&0x20 != 0); err != nil {
+		if err := store.writeCopiedMessage(stream, folder, selected[mid], session.Identity(), request.flags&0x20 != 0); err != nil {
 			return reply(storeError(err))
 		}
 	}
@@ -119,8 +119,8 @@ func openFastTransferCopyMessages(ctx context.Context, session core.Session, obj
 	return reply(0)
 }
 
-func (s *ramStore) writeCopiedMessage(stream *fastTransfer, folder serverObject, row messageRow, sendEntryID bool) error {
-	payload, err := s.projectContentsPayload(row)
+func (s *ramStore) writeCopiedMessage(stream *fastTransfer, folder serverObject, row messageRow, identity core.Identity, sendEntryID bool) error {
+	payload, err := s.projectContentsPayload(row, identity)
 	if err != nil {
 		return err
 	}

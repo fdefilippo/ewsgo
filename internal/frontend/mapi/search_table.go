@@ -240,7 +240,7 @@ func (table *contentsTable) appendSearchSource(ctx context.Context, session core
 	}
 	defer projection.release()
 	start := len(table.rows)
-	if err := table.appendMessageRows(ctx, binding, snapshot, predicate, used); err != nil {
+	if err := table.appendMessageRows(ctx, session.Identity(), binding, snapshot, predicate, used); err != nil {
 		return err
 	}
 	if frozen != nil {

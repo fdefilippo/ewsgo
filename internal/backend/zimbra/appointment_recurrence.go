@@ -155,7 +155,10 @@ func sameAppointmentRecurrence(want, got *core.AppointmentRecurrence) bool {
 	if want == nil || got == nil {
 		return want == got
 	}
+	// Zimbra drops WKST for weekly interval 1. Week boundaries do not
+	// affect which dates occur when every week participates.
+	sameWeekStart := want.FirstDay == got.FirstDay || want.Frequency == core.RecurrenceWeekly && want.Interval == 1
 	return want.Frequency == got.Frequency && want.Interval == got.Interval && want.Count == got.Count &&
-		want.StartDate.Equal(got.StartDate) && want.Until.Equal(got.Until) && want.FirstDay == got.FirstDay &&
+		want.StartDate.Equal(got.StartDate) && want.Until.Equal(got.Until) && sameWeekStart &&
 		slices.Equal(want.Days, got.Days)
 }

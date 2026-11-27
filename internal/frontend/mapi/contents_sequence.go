@@ -92,6 +92,9 @@ func (d *contentsDownload) prepareSegment(ctx context.Context, session core.Sess
 		if hydrate {
 			change, err = store.loadIndexedContents(ctx, session, change.row)
 		}
+		if err == nil && change.row.special == 0 && nativeMeetingKind(change.row.object.Properties) != 0 {
+			err = registerMeetingNames(ctx, &store.named)
+		}
 		if err == nil {
 			err = store.writeContentsChange(stream, d.config, d.plan.selection, change)
 		}
@@ -147,7 +150,7 @@ func (s *ramStore) loadIndexedContents(ctx context.Context, session core.Session
 		return contentsChange{}, core.ErrConflict
 	}
 	row.object = object
-	return s.projectContentsRow(row)
+	return s.projectContentsRow(row, session.Identity())
 }
 
 func hasIndexedChanges(changes []contentsChange) bool {

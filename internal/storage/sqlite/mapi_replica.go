@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"ewsgo/internal/core"
 	"ewsgo/internal/mapireplica"
@@ -40,7 +41,11 @@ func validMAPIObjectID(binding MAPIObjectID) bool {
 
 // LoadMAPIReplica opens the wire namespace and returns a consistent snapshot.
 // mailboxID must be the authenticated backend instance binding from BindMailbox.
-func (s *Store) LoadMAPIReplica(ctx context.Context, mailboxID string) (MAPIReplicaSnapshot, error) {
+func (s *Store) LoadMAPIReplica(ctx context.Context, mailboxID string) (_ MAPIReplicaSnapshot, err error) {
+	start := time.Now()
+	defer func() {
+		core.RecordActivity(ctx, core.Activity{Layer: "sqlite", Operation: "LoadMAPIReplica", Result: core.ActivityOutcome(err), Duration: time.Since(start)})
+	}()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return MAPIReplicaSnapshot{}, fmt.Errorf("begin MAPI replica load: %w", err)
@@ -185,7 +190,11 @@ type MAPIReplicaMutation = mapireplica.Mutation
 
 // CommitMAPIReplica commits imported IDs, projections and private data before
 // any of them can be returned to the client.
-func (s *Store) CommitMAPIReplica(ctx context.Context, mailboxID string, expected MAPIReplicaVersion, mutation MAPIReplicaMutation) error {
+func (s *Store) CommitMAPIReplica(ctx context.Context, mailboxID string, expected MAPIReplicaVersion, mutation MAPIReplicaMutation) (err error) {
+	start := time.Now()
+	defer func() {
+		core.RecordActivity(ctx, core.Activity{Layer: "sqlite", Operation: "CommitMAPIReplica", Result: core.ActivityOutcome(err), Duration: time.Since(start)})
+	}()
 	bindingCount := len(mutation.Bindings) + len(mutation.ReservedBindings) + len(mutation.StagedBindings)
 	if expected.Epoch == ([16]byte{}) || mutation.HighWater <= expected.HighWater || mutation.HighWater > maxMAPICounter ||
 		bindingCount > maxMAPIObjectID || len(mutation.Drafts)+len(mutation.ForgetDrafts) > maxMAPIObjectID ||

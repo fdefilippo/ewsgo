@@ -190,13 +190,26 @@ func projectMailContentsAtDepth(o core.Object, depth int, budget *mailProjection
 	if err := projectMailSenders(&result, message.Header); err != nil {
 		return projectedMessage{}, err
 	}
-	for i, recipient := range o.Recipients {
+	if err := projectMessageRecipients(&result, o.Recipients); err != nil {
+		return projectedMessage{}, err
+	}
+	hasAttachments := len(result.attachments) != 0
+	putContentsValue(result.values, 0x0e1b000b, core.Bool(hasAttachments))
+	putContentsValue(result.values, 0x0e070003, core.Integer(mailContentsFlags(o, hasAttachments)))
+	if result.bytes > maxMailProjectionBytes {
+		return projectedMessage{}, core.ErrUnsupported
+	}
+	return result, nil
+}
+
+func projectMessageRecipients(result *projectedMessage, recipients []core.Recipient) error {
+	for i, recipient := range recipients {
 		if recipient.Kind < core.RecipientTo || recipient.Kind > core.RecipientBcc || !validMailText(recipient.DisplayName) {
-			return projectedMessage{}, core.ErrUnsupported
+			return core.ErrUnsupported
 		}
 		address, err := mail.ParseAddress(recipient.Address)
 		if err != nil || address.Name != "" || address.Address != recipient.Address {
-			return projectedMessage{}, core.ErrInvalid
+			return core.ErrInvalid
 		}
 		row := contentsValues{}
 		putContentsValue(row, 0x30000003, core.Integer(i)) // PidTagRowid, local to this full recipient list.
@@ -209,17 +222,12 @@ func projectMailContentsAtDepth(o core.Object, depth int, budget *mailProjection
 		result.recipients = append(result.recipients, row)
 		result.bytes += 1024 + 4*len(recipient.Address) + 2*len(recipient.DisplayName)
 	}
-	hasAttachments := len(result.attachments) != 0
-	putContentsValue(result.values, 0x0e1b000b, core.Bool(hasAttachments))
-	putContentsValue(result.values, 0x0e070003, core.Integer(mailContentsFlags(o, hasAttachments)))
-	if result.bytes > maxMailProjectionBytes {
-		return projectedMessage{}, core.ErrUnsupported
-	}
-	return result, nil
+	return nil
 }
 
 func projectMailContentsMetadata(values contentsValues, o core.Object) error {
-	putContentsValue(values, 0x001a001f, core.Text("IPM.Note"))
+	putContentsValue(values, 0x001a001f, mailMessageClass(o.Properties))
+	projectMeetingProperties(values, o.Properties)
 	for key, tag := range map[core.Key]uint32{core.ReceivedAt: 0x0e060040, core.IsRead: 0x0e69000b, core.DeferredActionsPending: hasDAMs} {
 		if value := o.Properties[key]; value != nil {
 			if !contentsValueType(uint16(tag), value) {
@@ -237,7 +245,7 @@ func projectMailFollowUp(values contentsValues, properties core.Properties) {
 	switch flag.Status {
 	case core.FollowUpMarked:
 		putContentsValue(values, flagStatusTag, core.Integer(2))
-		putContentsValue(values, followupIconTag, core.Integer(6)) // Red follow-up flag.
+		putContentsValue(values, followupIconTag, core.Integer(6)) // Red, as used by Gromox for an IMAP flag.
 	case core.FollowUpComplete:
 		putContentsValue(values, flagStatusTag, core.Integer(1))
 		if completed := flag.Complete.UTC(); completed.Year() >= 1601 && completed.Year() <= 9999 {
@@ -286,6 +294,19 @@ func embeddedMailRecipients(header textproto.MIMEHeader) ([]core.Recipient, erro
 	return recipients, nil
 }
 
+var representingNameTags = [...]uint32{0x0042001f, 0x0064001f, 0x0065001f, 0x5d02001f}
+var senderNameTags = [...]uint32{0x0c1a001f, 0x0c1e001f, 0x0c1f001f, 0x5d01001f}
+
+const representingEntryTag = 0x00410102
+const senderEntryTag = 0x0c190102
+
+func smtpOneOffEntry(display, address string) core.Binary {
+	entry := append([]byte("\x00\x00\x00\x00"+oneOffProvider), 0, 0, 1, 0x80)
+	entry = append(entry, contentsUnicode(display)...)
+	entry = append(entry, contentsUnicode("SMTP")...)
+	return append(entry, contentsUnicode(address)...)
+}
+
 func projectMailSenders(result *projectedMessage, header mail.Header) error {
 	parser := mail.AddressParser{WordDecoder: &mime.WordDecoder{CharsetReader: mailCharsetReader}}
 	var from *mail.Address
@@ -293,8 +314,8 @@ func projectMailSenders(result *projectedMessage, header mail.Header) error {
 		name string
 		tags [4]uint32
 	}{
-		{"From", [4]uint32{0x0042001f, 0x0064001f, 0x0065001f, 0x5d02001f}},
-		{"Sender", [4]uint32{0x0c1a001f, 0x0c1e001f, 0x0c1f001f, 0x5d01001f}},
+		{"From", representingNameTags},
+		{"Sender", senderNameTags},
 	} {
 		raw := header.Get(item.name)
 		var address *mail.Address

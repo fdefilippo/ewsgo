@@ -104,3 +104,17 @@ func (s *Store) DraftProperties(ctx context.Context, mailboxID, ref string) (map
 func validDraftStringProperty(key core.Key, value core.Text) bool {
 	return key.Valid() && key.Set != "" && key.Name != "" && len(key.Name) <= 255 && len(value) <= 4096
 }
+
+// SetDraftStringProperty updates one gateway-owned field for an existing
+// opaque draft reference. The reference can be registered before SOAP writes.
+func (s *Store) SetDraftStringProperty(ctx context.Context, mailboxID, ref string, key core.Key, value core.Text) error {
+	if mailboxID == "" || !core.ValidDraftReference(ref) || !validDraftStringProperty(key, value) {
+		return core.ErrInvalid
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO draft_string_properties (mailbox_id, reference, created_at, property_set, property_name, value)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (mailbox_id, reference, property_set, property_name) DO UPDATE SET value=excluded.value
+	`, mailboxID, ref, time.Now().UnixNano(), key.Set, key.Name, value)
+	return err
+}

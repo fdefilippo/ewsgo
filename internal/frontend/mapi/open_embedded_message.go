@@ -91,11 +91,7 @@ func openEmbeddedMessage(ctx context.Context, session core.Session, state *conte
 		return fail(nullObject)
 	}
 	request := op.OpenMessage
-	switch request.mode {
-	case 0:
-	case 1, 2: // ReadWrite, Create.
-		return fail(accessDenied)
-	default:
+	if request.mode > 2 {
 		return fail(0x80070057)
 	}
 	cp := uint32(request.codePage)
@@ -104,6 +100,12 @@ func openEmbeddedMessage(ctx context.Context, session core.Session, state *conte
 	}
 	if _, ok := propertyString8("", cp); !ok {
 		return fail(0x03ef)
+	}
+	if attachment.draft != nil && attachment.draft.calendar != nil {
+		return openCalendarException(ctx, session, objects, input, op, handles, cp)
+	}
+	if request.mode != 0 {
+		return fail(accessDenied)
 	}
 	message := attachment.message
 	if attachment.draft != nil || message.mailDraft != nil || !message.contentVersioned {

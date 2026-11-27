@@ -368,28 +368,32 @@ func (m *mailbox) updateAppointmentDetails(ctx context.Context, before core.Appo
 	// Zimbra modifies an invite using a full component. Copy the native
 	// component and timezone definitions so projected fields cannot erase them.
 	replacement := invite
-	replacement.Children = slices.Clone(invite.Children)
+	replacement.Children = make([]node, 0, len(invite.Children))
 	operation, expected := "ModifyAppointment", before.Type
-	for i := range replacement.Children {
-		if &invite.Children[i] == comp {
-			part := replaceAppointmentAttr(*comp, "name", subject)
-			part = replaceAppointmentAttr(part, "loc", location)
-			if newException {
-				part, err = occurrenceComponent(part, before, rid, start, end)
-				if err != nil {
-					return core.Appointment{}, err
-				}
-				operation, expected = "CreateAppointmentException", core.AppointmentException
-			} else if rescheduled {
-				part, err = rescheduleAppointmentComponent(part, before, start, end)
-				if err != nil {
-					return core.Appointment{}, err
-				}
-			}
-			replacement.Children[i] = part
-			break
+	replaceException := newException
+	if before.Type == core.AppointmentException && masterUsesInvite(*detail, inviteID, compNum) {
+		// A personal exception can share the master's invite address.
+		// ModifyAppointment at that address selects the master. Target the
+		// original slot explicitly through CreateAppointmentException.
+		replaceException = true
+	}
+	part := replaceAppointmentAttr(*comp, "name", subject)
+	part = replaceAppointmentAttr(part, "loc", location)
+	if replaceException {
+		part, err = occurrenceComponent(part, before, rid, start, end)
+		operation, expected = "CreateAppointmentException", core.AppointmentException
+	} else if rescheduled {
+		part, err = rescheduleAppointmentComponent(part, before, start, end)
+	}
+	if err != nil {
+		return core.Appointment{}, err
+	}
+	for _, child := range invite.Children {
+		if child.XMLName.Space == mailNS && child.XMLName.Local == "tz" {
+			replacement.Children = append(replacement.Children, child)
 		}
 	}
+	replacement.Children = append(replacement.Children, part)
 	children := append(recipients, element(mailNS, "su", subject), replacement)
 	msg := attr(element(mailNS, "m", "", children...), "l", detail.get("l"))
 	req := attr(attr(element(mailNS, operation+"Request", "", msg), "id", id+"-"+inviteID), "comp", compNum)
@@ -413,6 +417,12 @@ func (m *mailbox) updateAppointmentDetails(ctx context.Context, before core.Appo
 		return core.Appointment{}, core.ErrOutcomeUnknown
 	}
 	return saved, nil
+}
+
+func masterUsesInvite(detail node, id, component string) bool {
+	return appointmentComponent(detail, func(invite, comp node) bool {
+		return comp.get("ex") != "1" && invite.get("id") == id && invite.get("compNum") == component
+	}) != nil
 }
 
 func personalAppointment(detail node) bool {

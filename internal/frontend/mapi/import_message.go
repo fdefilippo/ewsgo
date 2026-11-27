@@ -40,6 +40,8 @@ type mailImportDraft struct {
 	files            [][]byte
 	fileBytes        int
 	fileLease        *contentsLease
+	pendingException *calendarExceptionDraft
+	exception        *savedCalendarException
 	contentRevision  core.Integer
 	contentVersioned bool
 	saved            bool
@@ -161,6 +163,7 @@ func (d *mailImportDraft) close() {
 	d.recipients, d.recipientLease = nil, nil
 	d.fileLease.release()
 	d.files, d.fileLease, d.fileBytes = nil, nil, 0
+	d.pendingException, d.exception = nil, nil
 }
 
 type mailImportUpload struct {

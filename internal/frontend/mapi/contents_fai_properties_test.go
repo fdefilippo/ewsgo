@@ -23,7 +23,7 @@ func TestContentsFAIFlagsAndAbsentDeliveryTimePredicates(t *testing.T) {
 		if err != nil || len(observation.snapshot.messages) != 1 {
 			t.Fatal("FAI observation")
 		}
-		change, err := f.store.projectContentsRow(observation.snapshot.messages[0])
+		change, err := f.store.projectContentsRow(observation.snapshot.messages[0], core.Identity{})
 		observation.close()
 		if err != nil || change.payload.values[fixedContentsProperty(0x0e070003)] != core.Integer(0x40) {
 			t.Fatal("FAI flags must identify associated object without a read flag")

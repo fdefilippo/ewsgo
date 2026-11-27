@@ -471,3 +471,317 @@ func TestSQLiteAppointmentImportReconcilesWithoutCreatingAgain(t *testing.T) {
 		t.Fatal("the published appointment lost the stable Outlook identity", err)
 	}
 }
+
+func TestAppointmentImportFiniteWeeklyAndException(t *testing.T) {
+	first := time.Date(2027, 3, 22, 0, 0, 0, 0, time.UTC)
+	wall := first.Add(9 * time.Hour)
+	start := wall.Add(-time.Hour)
+	end := start.Add(time.Hour)
+	item := core.Appointment{Type: core.AppointmentMaster, Subject: "Fixture", Location: "Main room", Start: start, End: end,
+		Recurrence: &core.AppointmentRecurrence{Frequency: core.RecurrenceWeekly, Interval: 1, Count: 3,
+			StartDate: first, Days: []time.Weekday{time.Monday}, FirstDay: time.Monday},
+		SeriesSchedule: &core.AppointmentSeriesSchedule{WallStart: wall, WallEnd: wall.Add(time.Hour)}}
+	zone, _ := encodeAppointmentZoneDefinition(appointmentImportRomeZone(), true)
+	encoded, ok := encodeAppointmentRecurrence(item)
+	if !ok {
+		t.Fatal("could not encode test recurrence")
+	}
+	values := contentsValues{
+		fixedContentsProperty(0x001a001f):                           core.Text("IPM.Appointment"),
+		fixedContentsProperty(0x0037001f):                           core.Text(item.Subject),
+		calendarSearchNamed(appointmentLocation, 0x001f).property:   core.Text(item.Location),
+		calendarSearchNamed(appointmentStartWhole, 0x0040).property: core.Timestamp(start),
+		calendarSearchNamed(appointmentEndWhole, 0x0040).property:   core.Timestamp(end),
+		calendarSearchNamed(appointmentRecurZone, 0x0102).property:  zone,
+		calendarSearchNamed(appointmentRecurType, 0x0003).property:  core.Integer(encoded.kind),
+		appointmentRecurrenceProperty:                               encoded.data,
+	}
+	got, err := appointmentImportItem(values)
+	if err != nil || !equalAppointmentRules(got.Recurrence, item.Recurrence) || got.TimeZone != "Europe/Rome" ||
+		!got.SeriesSchedule.WallStart.Equal(wall) {
+		t.Fatal("could not create the weekly series", err)
+	}
+	// The effective TZDEFINITION rule can lack the recurrence flag.
+	// The legacy recurrence structure still establishes the same offsets.
+	effective, _ := encodeAppointmentZoneDefinition(appointmentImportRomeZone(), false)
+	zoneStruct := calendarSearchNamed(appointmentZoneStruct, 0x0102).property
+	values[zoneStruct] = encodeAppointmentZoneStruct(*appointmentImportRomeZone())
+	values[calendarSearchNamed(appointmentRecurZone, 0x0102).property] = effective
+	got, err = appointmentImportItem(values)
+	if err != nil || got.TimeZone != "Europe/Rome" || !got.SeriesSchedule.WallStart.Equal(wall) {
+		t.Fatal("could not match the legacy recurrence to its named time zone", err)
+	}
+	values[zoneStruct] = encodeAppointmentZoneStruct(core.AppointmentZone{})
+	if _, err := appointmentImportItem(values); !errors.Is(err, core.ErrUnsupported) {
+		t.Fatal("a different effective time zone cannot replace the legacy rule", err)
+	}
+	delete(values, zoneStruct)
+	anchor := wall.AddDate(0, 0, 7)
+	exception := core.AppointmentSeriesException{WallStart: anchor.Add(time.Hour), WallEnd: anchor.Add(2 * time.Hour),
+		WallOriginalStart: anchor, Subject: "Fixture", Location: "Sala città"}
+	item.SeriesSchedule.Exceptions = []core.AppointmentSeriesException{exception}
+	encoded, ok = encodeAppointmentRecurrence(item)
+	if !ok {
+		t.Fatal("could not encode the exception")
+	}
+	data := encoded.data
+	values[appointmentRecurrenceProperty] = data
+	got, err = appointmentSeriesImport(values, data)
+	if err != nil || len(got.SeriesSchedule.Exceptions) != 1 || got.SeriesSchedule.Exceptions[0] != exception {
+		t.Fatal("could not decode the original anchor or Unicode location", err)
+	}
+	if _, err := appointmentImportItem(values); !errors.Is(err, core.ErrUnsupported) {
+		t.Fatal("creation with unsupported preexisting occurrence changes must fail before writing", err)
+	}
+	if _, _, err := decodeAppointmentRecurrence(data[:len(data)-1], item); !errors.Is(err, core.ErrInvalid) {
+		t.Fatal("truncated recurrence was accepted", err)
+	}
+	utc, ok := wallAppointmentInstant(anchor, *appointmentImportRomeZone())
+	if !ok || !utc.Equal(anchor.Add(-2*time.Hour)) {
+		t.Fatal("exception did not use the daylight offset at its anchor")
+	}
+}
+
+func TestAppointmentClipBounds(t *testing.T) {
+	first := time.Date(2027, 3, 22, 0, 0, 0, 0, time.UTC)
+	wall := first.Add(9 * time.Hour)
+	item := core.Appointment{
+		Type: core.AppointmentSingle, Start: wall.Add(-time.Hour), End: wall,
+		StartZone: appointmentImportRomeZone(),
+	}
+	check := func(start, end time.Time) {
+		t.Helper()
+		p := mapAppointmentProperties(item)
+		if p[appointmentClipStart] != core.Timestamp(start) || p[appointmentClipEnd] != core.Timestamp(end) {
+			t.Fatalf("Clip bounds = %v, %v, want %v, %v", p[appointmentClipStart], p[appointmentClipEnd], start, end)
+		}
+	}
+	check(item.Start, item.End)
+	item.Type = core.AppointmentMaster
+	item.Recurrence = &core.AppointmentRecurrence{
+		Frequency: core.RecurrenceWeekly, Interval: 1, Count: 3,
+		StartDate: first, Days: []time.Weekday{time.Monday}, FirstDay: time.Monday,
+	}
+	item.SeriesSchedule = &core.AppointmentSeriesSchedule{WallStart: wall, WallEnd: wall.Add(time.Hour)}
+	check(first.Add(-time.Hour), first.AddDate(0, 0, 14).Add(-2*time.Hour))
+	item.Recurrence.Count = 0
+	check(first.Add(-time.Hour), time.Date(4500, 8, 31, 23, 59, 0, 0, time.UTC))
+	for _, key := range []core.Key{appointmentClipStart, appointmentClipEnd} {
+		p := calendarSearchNamed(key, 0x0040).property
+		if !tableRestrictionSchema(&contentsTable{special: core.CalendarFolder}, p) ||
+			tableRestrictionSchema(&contentsTable{}, p) {
+			t.Fatalf("clip property has the wrong table restriction scope: %v", key)
+		}
+	}
+}
+
+func TestCalendarAttachmentTableWithNoAttachments(t *testing.T) {
+	f, cal := newCalendarFixture(t)
+	f.transport.EnableContentsDownloadSpike()
+	f.transport.EnableContentsTableSpike()
+	t.Cleanup(f.state.mailbox.close)
+	f.handles = append(f.handles, 0xffffffff, 0xffffffff)
+	start := time.Date(2027, time.March, 29, 9, 0, 0, 0, time.UTC)
+	box := &appointmentImportMailbox{calendarMailbox: cal, item: core.Appointment{
+		Identity: core.Object{ID: "appointment:42", Parent: cal.calendar.ID, Kind: core.AppointmentItem, Revision: 7,
+			Properties: core.Properties{core.IsRead: core.Bool(true), core.HasAttachments: core.Bool(false),
+				core.MetadataRevision: core.Integer(7), core.ContentRevision: core.Integer(7), core.LastModifiedAt: core.Timestamp(start)}},
+		Subject: "Fixture", Start: start, End: start.Add(time.Hour), Participation: core.AppointmentPersonal,
+	}}
+	f.session = &testSession{box: box}
+	converted := faiRunOK(t, f, conversionOperation(0x44, calendarEntry(t, f)[22:]))
+	fid := binary.LittleEndian.Uint64(converted[6:])
+	faiRunOK(t, f, folderOperation(fid, 4, 0, 1))
+	store := replicaStore(t, f)
+	view, err := store.observeCalendarSearchItems(t.Context(), f.session, fid, core.CalendarFolder)
+	if err != nil || len(view.messages) != 1 {
+		t.Fatal("could not observe the calendar appointment", err)
+	}
+	faiRunOK(t, f, openMessageOperation(4, 1, 3, fid, view.messages[0].mid, 0x0fff, 0))
+	faiRunOK(t, f, []byte{0x21, 4, 3, 2, 0})
+	if position := faiRunOK(t, f, []byte{0x17, 4, 2}); len(position) != 14 || binary.LittleEndian.Uint32(position[10:]) != 0 {
+		t.Fatal("appointment attachment table was not empty")
+	}
+	box.item.Identity.Properties[core.HasAttachments] = core.Bool(true)
+	if wire, _ := f.run([]byte{0x17, 4, 2}); !bytes.Equal(wire, ropError(0x17, 2, NotSupported)) {
+		t.Fatal("empty table continued to authorize after attachment appeared")
+	}
+}
+
+func qualifyNativeRecurringAppointment(t *testing.T, ctx context.Context, native core.Session, inbox uint64, okROP func([]byte) []byte, run func([]byte, uint32) []byte) {
+	t.Helper()
+	box := native.Mailbox()
+	reader := box.(core.AppointmentContentsReader)
+	writer := box.(core.AppointmentWriter)
+	folder, err := box.(core.SpecialFolderReader).SpecialFolder(ctx, core.CalendarFolder)
+	if err != nil {
+		t.Fatal("native Calendar unavailable")
+	}
+	title := "EWSGo recurring fixture " + time.Now().UTC().Format("20060102T150405.000000000")
+	read := func(ctx context.Context) core.Appointment {
+		t.Helper()
+		items, err := reader.ListAppointments(ctx, folder.ID)
+		if err != nil {
+			t.Fatal("could not read native Calendar", err)
+		}
+		var result core.Appointment
+		for _, item := range items {
+			if item.Subject == title {
+				if result.Identity.ID != "" {
+					t.Fatal("duplicate native fixture")
+				}
+				result = item
+			}
+		}
+		return result
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if item := read(cleanup); item.Identity.ID != "" {
+			if err := writer.TrashAppointment(cleanup, item); err != nil {
+				t.Error("could not trash native recurring fixture", err)
+			}
+		}
+	}()
+
+	okROP(folderOperation(inbox, 4, 0, 1))
+	entry := okROP(folderPropertiesOperation(4, 1, 1, 0x36d00102))
+	fid := binary.LittleEndian.Uint64(okROP(conversionOperation(0x44, entry[31:]))[6:])
+	okROP(folderOperation(fid, 4, 0, 1))
+	names := []propertyName{
+		appointmentRecurrenceProperty.name,
+		calendarSearchNamed(appointmentRecurZone, 0x0102).property.name,
+		calendarSearchNamed(appointmentLocation, 0x001f).property.name,
+	}
+	ids := propertyResponseIDs(t, ROPBuffer{Operations: okROP(propertyIDsOperation(4, 1, 2, names...))})
+	recurTag, zoneTag, locationTag := uint32(ids[0])<<16|0x0102, uint32(ids[1])<<16|0x0102, uint32(ids[2])<<16|0x001f
+
+	date := time.Date(2027, 3, 22, 0, 0, 0, 0, time.UTC)
+	wall := date.Add(10 * time.Hour)
+	expected := core.Appointment{
+		Subject: title, Type: core.AppointmentMaster, Location: "Initial room",
+		Start: wall.Add(-time.Hour), End: wall,
+		Recurrence: &core.AppointmentRecurrence{
+			Frequency: core.RecurrenceWeekly, Interval: 1, Count: 3, StartDate: date,
+			Days: []time.Weekday{time.Monday}, FirstDay: time.Sunday,
+		},
+		SeriesSchedule: &core.AppointmentSeriesSchedule{WallStart: wall, WallEnd: wall.Add(time.Hour)},
+	}
+	encodeRecurrence := func(item core.Appointment) core.Binary {
+		t.Helper()
+		encoded, ok := encodeAppointmentRecurrence(item)
+		if !ok {
+			t.Fatal("could not encode recurring fixture")
+		}
+		return encoded.data
+	}
+	zone, ok := encodeAppointmentZoneDefinition(appointmentImportRomeZone(), true)
+	if !ok {
+		t.Fatal("could not encode recurrence time zone")
+	}
+	create := binary.LittleEndian.AppendUint64([]byte{0x06, 4, 1, 3, 0xff, 0x0f}, fid)
+	create = append(create, 0)
+	set := faiSetOperation(3, faiSetRequest{
+		{0x0037001f, core.Text(title)}, {locationTag, core.Text(expected.Location)},
+		{appointmentStartDateTag, core.Timestamp(expected.Start)}, {appointmentEndDateTag, core.Timestamp(expected.End)},
+		{recurTag, encodeRecurrence(expected)}, {zoneTag, zone},
+	})
+	if reply := okROP(append(create, set...)); len(reply) != 15 || !bytes.Equal(reply[7:], propertyProblemsResponse(0x0a, 3, nil)) {
+		t.Fatal("CreateMessage and SetProperties did not stage a series")
+	}
+	save := []byte{0x0c, 4, 4, 3, 2}
+	saved := okROP(save)
+	first := read(ctx)
+	if first.UID == "" || first.SeriesSchedule == nil || !equalAppointmentRules(first.Recurrence, expected.Recurrence) ||
+		!first.Start.Equal(expected.Start) || first.Location != expected.Location {
+		t.Fatal("new native series differs")
+	}
+	const afterLocation = "Edited master room"
+	okROP(faiSetOperation(3, faiSetRequest{{locationTag, core.Text(afterLocation)}}))
+	if !bytes.Equal(okROP(save), saved) {
+		t.Fatal("master edit changed MAPI identity")
+	}
+	master := read(ctx)
+	if master.Location != afterLocation || master.UID != first.UID || master.Identity.Revision <= first.Identity.Revision {
+		t.Fatal("native master was not edited in place")
+	}
+	occurrence := wall.AddDate(0, 0, 7)
+	exception := core.AppointmentSeriesException{
+		WallOriginalStart: occurrence, WallStart: occurrence.Add(30 * time.Minute), WallEnd: occurrence.Add(90 * time.Minute),
+		Subject: title, Location: "Edited occurrence room",
+	}
+	master.SeriesSchedule.Exceptions = []core.AppointmentSeriesException{exception}
+	okROP(faiSetOperation(3, faiSetRequest{{recurTag, encodeRecurrence(master)}}))
+	if !bytes.Equal(okROP(save), saved) {
+		t.Fatal("exception edit changed MAPI identity")
+	}
+	after := read(ctx)
+	if after.UID != first.UID || after.Location != afterLocation || after.Identity.Revision <= master.Identity.Revision ||
+		after.SeriesSchedule == nil || !sameAppointmentExceptions(after.SeriesSchedule.Exceptions, []core.AppointmentSeriesException{exception}) ||
+		!equalAppointmentRules(after.Recurrence, expected.Recurrence) {
+		t.Fatal("native exception differs or changed the whole series")
+	}
+	// Outlook in cache uses an embedded calendar message while it imports the
+	// recurrence. Saving the embedded objects must leave Zimbra untouched.
+	source := okROP(folderPropertiesOperation(4, 3, 1, 0x65e00102))
+	change := okROP(folderPropertiesOperation(4, 3, 1, 0x65e20102))
+	request := syntheticFAIImport()
+	request.flags = 0
+	copy(request.source[:], source[9:])
+	serverChange := changeXID(change[9:])
+	if !serverChange.valid() {
+		t.Fatal("could not read the server-generated calendar change key")
+	}
+	request.predecessors[serverChange.namespace()] = serverChange.local()
+	okROP([]byte{1, 4, 3})
+	okROP([]byte{0x7e, 4, 1, 2, 1})
+	okROP(faiImportOperation(request))
+	okROP([]byte{ropCreateAttachment, 4, 3, 4})
+	replaceIDs := propertyResponseIDs(t, ROPBuffer{Operations: okROP(propertyIDsOperation(4, 1, 2, exceptionReplaceProperty.name))})
+	replaceTag := uint32(replaceIDs[0])<<16 | 0x0040
+	okROP([]byte{ropOpenEmbeddedMessage, 4, 4, 5, 0xff, 0x0f, 2})
+	exception.Location = "Edited from cache"
+	// The second occurrence is in daylight time in Europe/Rome.
+	anchorUTC := occurrence.Add(-2 * time.Hour)
+	attachment := faiSetOperation(4, faiSetRequest{
+		{0x37050003, core.Integer(5)}, {0x7ffd0003, core.Integer(2)}, {0x7ffe000b, core.Bool(true)},
+		// An inconsistent outer lookup hint must not select a different occurrence.
+		{exceptionReplaceTag, core.Timestamp(anchorUTC.AddDate(0, 0, 7))},
+	})
+	child := faiSetOperation(5, faiSetRequest{
+		{0x001a001f, core.Text(calendarExceptionClass)}, {0x0037001f, core.Text(exception.Subject)},
+		{replaceTag, core.Timestamp(anchorUTC)}, {locationTag, core.Text(exception.Location)},
+		{appointmentStartDateTag, core.Timestamp(exception.WallStart.Add(-2 * time.Hour))},
+		{appointmentEndDateTag, core.Timestamp(exception.WallEnd.Add(-2 * time.Hour))},
+	})
+	for slot, properties := range map[byte][]byte{4: attachment, 5: child} {
+		if reply := okROP(properties); !bytes.Equal(reply, propertyProblemsResponse(0x0a, slot, nil)) {
+			t.Fatalf("calendar attachment properties rejected for slot %d: %x", slot, reply)
+		}
+	}
+	if reply := run([]byte{0x0c, 4, 6, 5, 2}, 65535); len(reply) != 15 || binary.LittleEndian.Uint32(reply[2:]) != 0 {
+		t.Fatalf("saving the calendar exception message failed: %x", reply)
+	}
+	// Outlook saves the embedded message, releases the handles and then saves
+	// the master without issuing RopSaveChangesAttachment.
+	okROP([]byte{1, 4, 5, 1, 4, 4})
+	if read(ctx).Identity.Revision != after.Identity.Revision {
+		t.Fatal("saving the embedded message wrote to Zimbra")
+	}
+	after.SeriesSchedule.Exceptions = []core.AppointmentSeriesException{exception}
+	okROP(faiSetOperation(3, faiSetRequest{
+		{recurTag, encodeRecurrence(after)}, {0x0e1b000b, core.Bool(true)}, {0x0e070003, core.Integer(16)},
+	}))
+	if reply := run(save, 65535); !bytes.Equal(reply, saved) {
+		t.Fatalf("cached exception edit did not save the same master MID: %x", reply[:min(7, len(reply))])
+	}
+	cached := read(ctx)
+	if cached.UID != first.UID || cached.Identity.ID != after.Identity.ID ||
+		cached.SeriesSchedule == nil || !sameAppointmentExceptions(cached.SeriesSchedule.Exceptions, []core.AppointmentSeriesException{exception}) {
+		t.Fatal("cached exception did not persist with its original anchor")
+	}
+	for _, slot := range []byte{3, 1} {
+		okROP([]byte{1, 4, slot})
+	}
+}

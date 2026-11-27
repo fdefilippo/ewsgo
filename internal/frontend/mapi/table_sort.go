@@ -103,6 +103,9 @@ func tableSortSchema(table *contentsTable, p contentsProperty) bool {
 		}
 		return false
 	}
+	if table.special == core.CalendarFolder && appointmentContentsSchema(false)(p) {
+		return true
+	}
 	return contentsProjectionSchema(!table.associated, table.associated)(p)
 }
 

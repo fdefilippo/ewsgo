@@ -131,6 +131,17 @@ func (m *mailbox) calendarView(ctx context.Context, folder core.ID, id string, f
 	return items, ctx.Err()
 }
 
+func (m *mailbox) GetAppointmentOccurrence(ctx context.Context, folder, series core.ID, anchor time.Time, allDay bool) (core.Appointment, error) {
+	if !strings.HasPrefix(string(series), core.AppointmentIDPrefix) || strings.ContainsRune(string(series), '@') || anchor.IsZero() {
+		return core.Appointment{}, core.ErrNotFound
+	}
+	format := zimbraRecurrenceStart
+	if allDay {
+		format = zimbraDay
+	}
+	return m.GetAppointment(ctx, folder, series+core.ID("@"+anchor.UTC().Format(format)))
+}
+
 func (m *mailbox) GetAppointment(ctx context.Context, folder, id core.ID) (core.Appointment, error) {
 	key, ok := strings.CutPrefix(string(id), core.AppointmentIDPrefix)
 	native, rid, instance := strings.Cut(key, "@")
@@ -227,6 +238,9 @@ func parseGetAppointmentForTarget(response node, target groupwareTarget, field, 
 	}
 	if target.itemPrefix != "" && !target.viewPrivate {
 		comp := masterComponent(*item)
+		if comp == nil {
+			_, comp = detachedAppointmentComponent(*item)
+		}
 		if comp == nil || !target.canReadAppointment(comp.get("class")) {
 			return nil, core.ErrAccessDenied
 		}
@@ -263,6 +277,7 @@ func appointmentIdentity(n node, parent core.ID) (core.Object, error) {
 		Revision: core.Revision(*ms), Properties: core.Properties{
 			core.ContentRevision: core.Integer(*rev),
 			core.LastModifiedAt:  core.Timestamp(time.Unix(int64(*md), 0).UTC()),
+			core.HasAttachments:  core.Bool(strings.Contains(n.get("f"), "a")),
 		},
 	}, nil
 }

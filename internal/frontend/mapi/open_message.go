@@ -35,6 +35,8 @@ type openedMessage struct {
 	contentRevision    core.Integer
 	contentVersioned   bool
 	embedded           *embeddedMessageRef
+	calendarException  *draftAttachment
+	embeddedReadOnly   bool
 	draft              *faiDraft
 	mailDraft          *mailDraft
 	contactDraft       *contactDraft
@@ -141,20 +143,13 @@ func (s *ramStore) readOpenedMessage(ctx context.Context, session core.Session, 
 		return s.readOpenedContact(ctx, session, fid, message.mid, key, folder)
 	}
 	if reader, ok := session.Mailbox().(core.AppointmentContentsReader); ok && key.special == core.CalendarFolder {
-		native, valid := strings.CutPrefix(string(key.id), "a:")
-		if !valid || native == "" {
-			return messageRow{}, core.ErrNotFound
-		}
-		item, err := reader.GetCalendarAppointment(ctx, folder.native, core.ID(core.AppointmentIDPrefix+native))
+		item, err := readOpenedCalendarAppointment(ctx, reader, folder, key)
 		if err != nil {
 			return messageRow{}, err
 		}
 		object, err := calendarAppointmentMessage(item, folder.native)
 		if err != nil {
 			return messageRow{}, err
-		}
-		if object.ID != key.id {
-			return messageRow{}, core.ErrConflict
 		}
 		read, _ := object.Properties[core.IsRead].(core.Bool)
 		row := s.observedOpenedMessage(fid, message.mid, key, object)
@@ -189,6 +184,22 @@ func (s *ramStore) readOpenedMessage(ctx context.Context, session core.Session, 
 		return messageRow{}, err
 	}
 	return s.observedOpenedMessage(fid, message.mid, key, object), nil
+}
+
+func readOpenedCalendarAppointment(ctx context.Context, reader core.AppointmentContentsReader, folder folderKey, key messageKey) (core.Appointment, error) {
+	native, valid := strings.CutPrefix(string(key.id), "a:")
+	if !valid || native == "" {
+		return core.Appointment{}, core.ErrNotFound
+	}
+	id := core.ID(core.AppointmentIDPrefix + native)
+	item, err := reader.GetCalendarAppointment(ctx, folder.native, id)
+	if err != nil {
+		return core.Appointment{}, err
+	}
+	if item.Identity.ID != id || item.Identity.Parent != folder.native || item.Identity.Kind != core.AppointmentItem {
+		return core.Appointment{}, core.ErrConflict
+	}
+	return item, ctx.Err()
 }
 
 func (s *ramStore) observedOpenedMessage(fid, mid uint64, key messageKey, object core.Object) messageRow {
@@ -413,7 +424,7 @@ func reloadCachedInformation(ctx context.Context, session core.Session, objects 
 func openMessageResponse(rop, index byte, message messageRow, limit int) ([]byte, uint32) {
 	object := message.object
 	var hasNamed byte
-	if message.associated || message.special != 0 {
+	if message.associated || message.special != 0 || nativeMeetingKind(object.Properties) != 0 {
 		// Native envelopes carry backend metadata in private core namespaces.
 		// FAI and calendar search rows carry MAPI named properties here.
 		for key := range object.Properties {
@@ -440,16 +451,25 @@ func openMessageResponse(rop, index byte, message messageRow, limit int) ([]byte
 		return nil, NotSupported
 	}
 	response = binary.LittleEndian.AppendUint16(response, uint16(len(object.Recipients)))
-	response = append(response, 0, 0, 0) // ColumnCount, RowCount.
+	meeting, organizer := hasCalendarRecipientRows(message), receivedMeetingOrganizer(message)
+	if meeting {
+		response = binary.LittleEndian.AppendUint16(response, uint16(len(meetingRecipientColumns)))
+		for _, tag := range meetingRecipientColumns {
+			response = append32(response, tag)
+		}
+	} else {
+		response = append(response, 0, 0) // No additional recipient columns.
+	}
+	response = append(response, 0) // RowCount.
 	if len(response) > limit {
 		return nil, tableBufferTooSmall
 	}
 	rowCount := len(response) - 1
-	for _, recipient := range object.Recipients {
+	for index, recipient := range object.Recipients {
 		if response[rowCount] == 255 {
 			break
 		}
-		row, ok := encodeOpenRecipient(recipient)
+		row, ok := encodeMessageRecipient(recipient, meeting, organizer && index == 0)
 		if !ok {
 			return nil, NotSupported
 		}
@@ -463,6 +483,10 @@ func openMessageResponse(rop, index byte, message messageRow, limit int) ([]byte
 }
 
 func encodeOpenRecipient(recipient core.Recipient) ([]byte, bool) {
+	return encodeMessageRecipient(recipient, false, false)
+}
+
+func encodeMessageRecipient(recipient core.Recipient, meeting, organizer bool) ([]byte, bool) {
 	var role byte
 	switch recipient.Kind {
 	case core.RecipientTo:
@@ -488,7 +512,31 @@ func encodeOpenRecipient(recipient core.Recipient) ([]byte, bool) {
 		binary.LittleEndian.PutUint16(wire, flags|0x10)
 		wire = append(wire, name...)
 	}
-	wire = append(wire, 0, 0, 0) // RecipientColumnCount and empty PropertyRow.
+	if meeting {
+		wire = binary.LittleEndian.AppendUint16(wire, uint16(len(meetingRecipientColumns)))
+		wire = append(wire, 0) // PropertyRow with no errors.
+		for _, value := range meetingRecipientValues(recipient, organizer) {
+			switch v := value.(type) {
+			case core.Integer:
+				wire = append32(wire, uint32(v))
+			case core.Bool:
+				wire = append(wire, 1)
+			case core.Text:
+				wire = append(wire, contentsUnicode(string(v))...)
+			case core.Binary:
+				if len(v) > 65535 {
+					return nil, false
+				}
+				wire = binary.LittleEndian.AppendUint16(wire, uint16(len(v)))
+				wire = append(wire, v...)
+			}
+		}
+	} else {
+		wire = append(wire, 0, 0, 0) // RecipientColumnCount and empty PropertyRow.
+	}
+	if len(wire) > 65535 {
+		return nil, false
+	}
 	row := binary.LittleEndian.AppendUint16([]byte{role}, 1200)
 	row = append(row, 0, 0) // Reserved.
 	row = binary.LittleEndian.AppendUint16(row, uint16(len(wire)))
@@ -498,6 +546,9 @@ func encodeOpenRecipient(recipient core.Recipient) ([]byte, bool) {
 func getOpenedMessageProperties(ctx context.Context, session core.Session, object serverObject, op Operation, diagnostic *StorePropertyDiagnostic) []byte {
 	fail := func(code uint32) []byte { return ropError(op.ID, op.Input, code) }
 	diagnostic.Message = true
+	if attachment := object.message.calendarException; attachment != nil {
+		return readCalendarExceptionProperties(ctx, session, object, op, diagnostic)
+	}
 	store := object.binding.store
 	request := *op.Properties
 	loadContents := (object.message.contentVersioned || object.message.mailDraft != nil) && slices.ContainsFunc(request.tags, messageContentPropertyTag)
@@ -533,8 +584,31 @@ func getOpenedMessageProperties(ctx context.Context, session core.Session, objec
 		}
 		return fail(storeError(err))
 	}
-	if op.ID == ropGetPropertiesAll || op.ID == 0x09 && row.special == core.CalendarFolder {
+	var meetingValues contentsValues
+	if !row.associated && row.special == 0 && nativeMeetingKind(row.object.Properties) != 0 {
+		meetingValues = make(contentsValues)
+		projectMeetingProperties(meetingValues, row.object.Properties)
+		store.projectMeetingDelivery(meetingValues, row.object, session.Identity())
+	}
+	if op.ID == ropGetPropertiesAll || op.ID == 0x09 && (row.special == core.CalendarFolder || meetingValues != nil) {
 		request.tags = allMessagePropertyTags(row, request, &store.named)
+		if meetingValues != nil {
+			if err := registerMeetingNames(ctx, &store.named); err != nil {
+				return fail(storeError(err))
+			}
+			store.named.mu.Lock()
+			for property := range meetingValues {
+				id := property.id
+				if id == 0 {
+					id = store.named.byKey[property.name]
+				}
+				if id != 0 {
+					request.tags = append(request.tags, uint32(id)<<16|uint32(property.kind))
+				}
+			}
+			store.named.mu.Unlock()
+			request.tags = enumeratedPropertyTags(request.tags, request.wantUnicode)
+		}
 		op.Properties = &request
 	}
 	writable := draft != nil && !draft.readOnly || object.message.mailDraft != nil && !object.message.mailDraft.readOnly ||
@@ -584,11 +658,21 @@ func getOpenedMessageProperties(ctx context.Context, session core.Session, objec
 			if !handled {
 				value = openedMessageProperty(row, object.binding, tag, request.wantUnicode, object.message.codePage, writable, request.variableBudget)
 			}
+		case meetingValues != nil:
+			var handled bool
+			partsRequest := request
+			if op.ID == 0x09 {
+				partsRequest.variableBudget = 0xffff
+			}
+			value, handled = openedMeetingProperty(meetingValues, tag, &store.named, partsRequest, object.message.codePage)
+			if !handled {
+				value = openedMessageProperty(row, object.binding, tag, request.wantUnicode, object.message.codePage, writable, request.variableBudget)
+			}
 		default:
 			value = openedMessageProperty(row, object.binding, tag, request.wantUnicode, object.message.codePage, writable, request.variableBudget)
 		}
 		if value.code == 0 && (variableMessageProperty(tag) || row.special == core.ContactsFolder && contactVariableProperty(tag) ||
-			row.special == core.CalendarFolder && (value.kind == 0x001e || value.kind == 0x001f || value.kind == 0x0102)) {
+			(row.special == core.CalendarFolder || meetingValues != nil) && (value.kind == 0x001e || value.kind == 0x001f || value.kind == 0x0102)) {
 			request.variableBudget -= max(0, len(value.data)-4) // Four bytes reserved for a property error.
 		}
 		values[i] = value
@@ -641,6 +725,9 @@ func allMessagePropertyTags(row messageRow, request specificProperties, names *n
 // has a handle and properties but has no globally visible registry entry.
 func (s *ramStore) messagePropertyRow(ctx context.Context, session core.Session, object serverObject) (messageRow, error) {
 	draft := object.message.draft
+	if appointment := object.message.appointmentDraft; appointment != nil && object.message.mid == 0 {
+		return appointment.unsavedRow(ctx, session, object)
+	}
 	if contact := object.message.contactDraft; contact != nil && object.message.mid == 0 {
 		if err := contact.refresh(ctx, session, object); err != nil {
 			return messageRow{}, err
@@ -698,7 +785,7 @@ func openedMessageProperty(row messageRow, binding storeBinding, tag uint32, uni
 	var text core.Text
 	switch id {
 	case 0x001a:
-		text = "IPM.Note"
+		text = mailMessageClass(row.object.Properties)
 		if row.associated || row.privateConfig || isDeferredAction(row) {
 			text, _ = row.object.Properties[core.Key{ID: uint32(id)}].(core.Text)
 		} else if row.special == core.ContactsFolder {
@@ -766,7 +853,7 @@ func openedMessageProperty(row messageRow, binding storeBinding, tag uint32, uni
 		}
 		value = folderPropertyValue{kind: 3, data: append32(nil, uint32(size))}
 	case 0x0e09, 0x0ff9, 0x0ffa, 0x0fff:
-		if row.associated || (row.special != 0 && row.special != core.ContactsFolder) || row.object.ID == "" {
+		if row.associated || (row.special != 0 && row.special != core.ContactsFolder && row.special != core.CalendarFolder) || row.object.ID == "" {
 			return missing
 		}
 		var entry []byte

@@ -163,6 +163,16 @@ func (s *ramStore) writeCopyMessage(ctx context.Context, session core.Session, f
 	if err != nil {
 		return err
 	}
+	class, _ := payload.values[fixedContentsProperty(0x001a001f)].(core.Text)
+	if class == "IPM.Appointment" && message.embedded == nil && s.isAppointmentMID(message.mid) {
+		if err := registerCalendarNames(ctx, &s.named); err != nil {
+			return err
+		}
+	} else if draftMeetingKind(string(class)) != 0 {
+		if err := registerMeetingNames(ctx, &s.named); err != nil {
+			return err
+		}
+	}
 	if err = s.writeFastTransferProperties(stream, payload.values, nil, request.includes); err != nil {
 		return err
 	}
@@ -185,11 +195,13 @@ func (s *ramStore) readCopyMessagePayload(ctx context.Context, session core.Sess
 		s.contentsMu.Lock()
 		row, err = s.readFAIRowLocked(ctx, fid, key.id)
 		s.contentsMu.Unlock()
+	} else if key.special == core.CalendarFolder {
+		row, err = s.readOpenedMessage(ctx, session, fid, message)
 	} else {
 		row.object, err = readOpenedMessageMIME(ctx, session, folder, key, message)
 	}
 	if err != nil {
 		return projectedMessage{}, err
 	}
-	return s.projectContentsPayload(row)
+	return s.projectContentsPayload(row, session.Identity())
 }

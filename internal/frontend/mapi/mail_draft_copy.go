@@ -185,6 +185,9 @@ func (d *mailDraft) copyFrom(ctx context.Context, session core.Session, source *
 	if subject != nil {
 		d.staged.Properties[core.Subject] = subject
 	}
+	if request.included == nil && has(0x001a001f) && (force || d.meeting.Class == "") && source.meeting.Class != "" {
+		d.meeting = source.meeting
+	}
 	if copyRecipients {
 		d.rows = maps.Clone(source.rows)
 		d.staged.Recipients = slices.Clone(source.staged.Recipients)

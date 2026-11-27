@@ -31,6 +31,7 @@ var activityNames = func() map[string]map[string]bool {
 		"ews":            "GetFolder SyncFolderHierarchy SyncFolderItems GetItem FindItem UpdateItem CreateItem MoveItem CopyItem DeleteItem CreateFolder UpdateFolder MoveFolder DeleteFolder CreateAttachment DeleteAttachment Subscribe GetEvents Unsubscribe GetUserAvailabilityRequest",
 		"mapi":           "Connect Execute Disconnect NotificationWait Bind Unbind QueryRows ResolveNames GetSpecialTable GetMatches GetProps GetPropList DNToMId GetHierarchyInfo GetNamesFromIDs GetIDsFromNames ResortRestriction CompareMIds SeekEntries UpdateStat ResolveNamesW PING Ping DraftSubmissionUnconfirmed DraftSubmissionUnconfirmedWithSentCopy TrashOutboxTransportCopy",
 		"rop":            "Execute",
+		"sqlite":         "LoadMAPIReplica CommitMAPIReplica",
 	}
 	out := make(map[string]map[string]bool, len(vocabularies))
 	for layer, names := range vocabularies {
@@ -50,7 +51,7 @@ func activityOperation(layer, op string) string {
 }
 func activityLayer(layer string) string {
 	switch layer {
-	case "authentication", "backend", "core", "ews", "mapi", "rop":
+	case "authentication", "backend", "core", "ews", "mapi", "rop", "sqlite":
 		return layer
 	}
 	return "other"

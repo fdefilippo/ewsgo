@@ -97,8 +97,9 @@ func readOpenedRecipients(ctx context.Context, session core.Session, objects *ma
 		return fail(PropertyNotFound)
 	}
 	response := append(fail(0), 0)
+	meeting, organizer := hasCalendarRecipientRows(row), receivedMeetingOrganizer(row)
 	for i := start; i < len(ids) && response[6] < 255; i++ {
-		wire, ok := encodeOpenRecipient(recipients[i])
+		wire, ok := encodeMessageRecipient(recipients[i], meeting, organizer && i == 0)
 		if !ok {
 			return fail(NotSupported)
 		}

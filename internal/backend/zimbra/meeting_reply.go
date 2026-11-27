@@ -157,7 +157,7 @@ func meetingMessageComponent(item node) *node {
 
 func projectMeetingMessage(properties core.Properties, item node) {
 	comp := meetingMessageComponent(item)
-	if comp == nil || comp.get("uid") == "" {
+	if comp == nil || comp.get("uid") == "" || len(comp.get("uid")) > 1024 {
 		return
 	}
 	var kind core.MeetingMessageKind
@@ -186,4 +186,27 @@ func projectMeetingMessage(properties core.Properties, item node) {
 	}
 	properties[core.MeetingMessageType] = core.Integer(kind)
 	properties[core.MeetingMessageUID] = core.Text(comp.get("uid"))
+	if location := comp.get("loc"); len(location) <= 4096 {
+		properties[core.MeetingMessageLocation] = core.Text(location)
+	}
+	allDay := comp.get("allDay") == "1"
+	if start, end, err := appointmentDates(*comp, allDay); err == nil {
+		properties[core.MeetingMessageStart] = core.Timestamp(start)
+		properties[core.MeetingMessageEnd] = core.Timestamp(end)
+		properties[core.MeetingMessageAllDay] = core.Bool(allDay)
+	}
+	if seq, err := strconv.ParseUint(comp.get("seq"), 10, 31); err == nil {
+		properties[core.MeetingMessageSequence] = core.Integer(seq)
+	}
+	if kind == core.MeetingRequestMessage {
+		properties[core.MeetingResponseRequested] = core.Bool(comp.get("rsvp") != "0")
+		// Zimbra emits ciFolder only when it resolves the calendar item in this
+		// mailbox. A remote or deleted item can lack that local folder evidence.
+		if properties[core.MeetingMessageSequence] == core.Integer(0) &&
+			comp.get("isOrg") != "1" && comp.get("ex") != "1" && comp.get("status") != "CANC" &&
+			comp.child(mailNS, "recur") == nil && comp.get("ciFolder") == specialFolderSpec(core.CalendarFolder).id &&
+			nativeID.MatchString(comp.get("calItemId")) {
+			properties[core.MeetingCalendarProcessed] = core.Bool(true)
+		}
+	}
 }

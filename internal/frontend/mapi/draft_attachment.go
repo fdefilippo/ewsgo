@@ -24,6 +24,7 @@ const (
 type draftAttachment struct {
 	parent                      *mailDraft
 	importParent                *mailImportDraft
+	calendar                    *calendarExceptionDraft
 	lease                       *contentsLease
 	number                      uint32
 	part                        int
@@ -48,6 +49,7 @@ func (a *draftAttachment) close() {
 		a.clearUnwritten()
 		a.lease.release()
 		a.lease, a.data = nil, nil
+		a.calendar = nil
 	}
 }
 
@@ -90,6 +92,9 @@ func (a *draftAttachment) setProperties(ctx context.Context, session core.Sessio
 	}
 	if err := a.editable(); err != nil {
 		return nil, err
+	}
+	if a.calendar != nil {
+		return a.calendar.setAttachment(values), nil
 	}
 	var problems []faiPropertyProblem
 	for i, value := range values {
@@ -143,6 +148,13 @@ func (a *draftAttachment) setProperties(ctx context.Context, session core.Sessio
 func (a *draftAttachment) properties() contentsValues {
 	row := make(contentsValues)
 	putContentsValue(row, attachNumberTag, core.Integer(a.number))
+	if a.calendar != nil {
+		for tag, value := range a.calendar.attachment {
+			putContentsValue(row, tag, value)
+		}
+		putContentsValue(row, 0x0ff70003, core.Integer(1))
+		return row
+	}
 	putContentsValue(row, 0x37050003, core.Integer(1))
 	putContentsValue(row, 0x370b0003, core.Integer(-1))
 	putContentsValue(row, 0x0e200003, core.Integer(len(a.data)))
@@ -235,6 +247,9 @@ func executeDraftAttachment(ctx context.Context, session core.Session, objects *
 		if draft.closed || draft.upload != nil {
 			return response(attachmentError(core.ErrConflict))
 		}
+		if draft.special == core.CalendarFolder && (draft.editKey.id == "" || len(draft.files) != 0) {
+			return response(NotSupported)
+		}
 		if err := draft.collector.state.authorize(ctx, session); err != nil {
 			return response(attachmentError(err))
 		}
@@ -242,8 +257,21 @@ func executeDraftAttachment(ctx context.Context, session core.Session, objects *
 			return response(0x000004db)
 		}
 		attachment := &draftAttachment{importParent: draft, number: uint32(len(draft.files)), dirty: true}
+		var retained *contentsLease
+		if draft.special == core.CalendarFolder {
+			var err error
+			retained, err = object.binding.store.reserveContentsMemory(128 << 10)
+			if err != nil {
+				return response(attachmentError(err))
+			}
+			attachment.calendar = &calendarExceptionDraft{}
+		}
 		if code := addDraftAttachment(objects, object, op, handles, attachment); code != 0 {
+			retained.release()
 			return response(code)
+		}
+		if attachment.calendar != nil {
+			draft.pendingException, draft.fileLease = attachment.calendar, retained
 		}
 		draft.files = append(draft.files, nil)
 		return append32(response(0), attachment.number)
@@ -289,7 +317,11 @@ func addDraftAttachment(objects *mailboxObjects, object serverObject, op Operati
 	if err != nil {
 		return 0x8007000e
 	}
-	lease, err := object.binding.store.reserveContentsMemory(2*core.MaxMailContentMIMEBytes + 8*attachmentCoverageWords)
+	budget := 2*core.MaxMailContentMIMEBytes + 8*attachmentCoverageWords
+	if attachment.calendar != nil {
+		budget = 128 << 10
+	}
+	lease, err := object.binding.store.reserveContentsMemory(budget)
 	if err != nil {
 		return attachmentError(err)
 	}
@@ -319,6 +351,13 @@ func (a *draftAttachment) save(ctx context.Context, session core.Session, flags 
 	}
 	if err := a.editable(); err != nil {
 		return err
+	}
+	if a.calendar != nil {
+		if err := a.saveCalendarException(); err != nil {
+			return err
+		}
+		a.readOnly = mode == 1
+		return nil
 	}
 	if !a.dirty {
 		a.readOnly = mode == 1

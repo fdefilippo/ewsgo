@@ -21,10 +21,10 @@ EWSGo is in preview. Lab tests on Zimbra FOSS 10.1.20 covered mail
 synchronization with MailCraft CLI and mail access in classic Outlook LTSC
 2021 in online and cached modes. Testing also covered personal contacts and
 appointments in Outlook, and recurring events and meeting invitations over
-EWS. Outlook writes to recurring events and Outlook invitation actions still
-need qualification. A later Outlook cached-mode test verified synchronization
-of 340 messages from a Zimbra Trash folder containing mail, contacts and
-appointments.
+EWS. Lab tests also verified recurring-event edits and meeting invitation
+responses in classic Outlook, and synchronization of a mixed Zimbra Trash
+folder containing 340 messages. Initial cached synchronization can take
+longer than reopening a populated Outlook profile.
 
 The Zimbra backend includes `ewsgo-rules` for Outlook rules, receive folders
 and deferred actions. Its source and installation guide are in

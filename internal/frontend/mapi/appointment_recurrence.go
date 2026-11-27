@@ -17,25 +17,33 @@ const minutesPerDay = 24 * 60
 
 var recurrenceEpoch = time.Date(1601, time.January, 1, 0, 0, 0, 0, time.UTC)
 
+const recurrenceNoEndDate = 0x5ae980df
+
+type appointmentRecurrenceEncoding struct {
+	data               core.Binary
+	kind               uint32
+	startDate, endDate uint32
+}
+
 // MS-OXOCAL 2.2.1.44.1 and 2.2.1.44.5. The input contains local
 // coordinates. Counting in UTC instants would skip or duplicate civil slots
 // around a daylight transition.
-func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bool) {
+func encodeAppointmentRecurrence(item core.Appointment) (appointmentRecurrenceEncoding, bool) {
 	r, schedule := item.Recurrence, item.SeriesSchedule
 	if r == nil || schedule == nil || r.Interval < 1 || r.Interval > 999 ||
 		r.Count < 0 || r.Count > 999 || r.Count != 0 && !r.Until.IsZero() {
-		return nil, 0, false
+		return appointmentRecurrenceEncoding{}, false
 	}
 	startDate, ok := recurrenceMinutes(r.StartDate)
 	if !ok || startDate%minutesPerDay != 0 {
-		return nil, 0, false
+		return appointmentRecurrenceEncoding{}, false
 	}
 	startOffset := (schedule.WallStart.Unix() - r.StartDate.Unix()) / 60
 	endOffset := (schedule.WallEnd.Unix() - r.StartDate.Unix()) / 60
 	if startOffset < 0 || startOffset >= minutesPerDay || endOffset < startOffset || endOffset > math.MaxUint32 ||
 		schedule.WallStart.Unix()%60 != 0 || schedule.WallEnd.Unix()%60 != 0 ||
 		schedule.WallStart.Nanosecond() != 0 || schedule.WallEnd.Nanosecond() != 0 {
-		return nil, 0, false
+		return appointmentRecurrenceEncoding{}, false
 	}
 
 	const daily, weekly = 0x200a, 0x200b
@@ -44,7 +52,7 @@ func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bo
 	days, startDay := []int{0}, 0
 	if r.Frequency == core.RecurrenceWeekly {
 		if r.Interval > 99 || r.FirstDay < time.Sunday || r.FirstDay > time.Saturday {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 		frequency, period, cycle, recurrenceType = weekly, uint32(r.Interval), 7*r.Interval, 2
 		firstDOW = uint32(r.FirstDay)
@@ -52,33 +60,33 @@ func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bo
 		days = make([]int, 0, len(r.Days))
 		for _, weekday := range r.Days {
 			if weekday < time.Sunday || weekday > time.Saturday || dayMask&(1<<weekday) != 0 {
-				return nil, 0, false
+				return appointmentRecurrenceEncoding{}, false
 			}
 			dayMask |= 1 << weekday
 			days = append(days, (int(weekday-r.FirstDay)+7)%7)
 		}
 		slices.Sort(days)
 	} else if r.Frequency != core.RecurrenceDaily || len(r.Days) != 0 {
-		return nil, 0, false
+		return appointmentRecurrenceEncoding{}, false
 	}
 	firstIndex := slices.Index(days, startDay)
 	if firstIndex < 0 {
-		return nil, 0, false
+		return appointmentRecurrenceEncoding{}, false
 	}
 	const endAfterDate, endAfterCount, noEnd = 0x2021, 0x2022, 0x2023
-	endType, count, endDate := uint32(noEnd), uint32(10), uint32(0x5ae980df)
+	endType, count, endDate := uint32(noEnd), uint32(10), uint32(recurrenceNoEndDate)
 	if r.Count != 0 {
 		index := firstIndex + r.Count - 1
 		delta := index/len(days)*cycle + days[index%len(days)] - startDay
 		last, ok := recurrenceMinutes(r.StartDate.AddDate(0, 0, delta))
 		if !ok {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 		endType, count, endDate = endAfterCount, uint32(r.Count), last
 	} else if !r.Until.IsZero() {
 		limit, ok := recurrenceMinutes(r.Until)
 		if !ok || limit < startDate || limit%minutesPerDay != 0 {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 		window := int((limit-startDate)/minutesPerDay) + startDay
 		periods, position := window/cycle, window%cycle
@@ -100,13 +108,13 @@ func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bo
 		return slices.Index(days, (int((day-startDate)/minutesPerDay)+startDay)%cycle)
 	}
 	if len(schedule.SkippedDates)+len(schedule.Exceptions) > (math.MaxUint16-80)/4 {
-		return nil, 0, false
+		return appointmentRecurrenceEncoding{}, false
 	}
 	skipped := make([]uint32, 0, len(schedule.SkippedDates)+len(schedule.Exceptions))
 	for _, date := range schedule.SkippedDates {
 		day, ok := recurrenceMinutes(date)
 		if !ok || day%minutesPerDay != 0 || occurrenceIndex(day) < 0 {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 		skipped = append(skipped, day)
 	}
@@ -116,7 +124,7 @@ func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bo
 		originalDay := recurrenceDay(wire.original)
 		index := occurrenceIndex(originalDay)
 		if !ok || wire.original%minutesPerDay != uint32(startOffset) || index < 0 {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 		previous := days[len(days)-1] - cycle
 		if index > 0 {
@@ -131,10 +139,10 @@ func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bo
 		newDay := int64(recurrenceDay(wire.start))
 		if previousDay >= int64(startDate) && (int64(wire.start) < previousDay+endOffset || newDay <= previousDay) ||
 			(endType == noEnd || followingDay <= int64(endDate)) && (int64(wire.end) > followingDay+startOffset || newDay >= followingDay) {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 		if slices.Contains(skipped, originalDay) {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 		skipped = append(skipped, originalDay)
 		exceptions = append(exceptions, wire)
@@ -144,7 +152,7 @@ func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bo
 	})
 	for i := 1; i < len(exceptions); i++ {
 		if exceptions[i-1].end > exceptions[i].start || recurrenceDay(exceptions[i-1].start) == recurrenceDay(exceptions[i].start) {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 	}
 	slices.Sort(skipped)
@@ -180,18 +188,18 @@ func encodeAppointmentRecurrence(item core.Appointment) (core.Binary, uint32, bo
 	for _, exception := range exceptions {
 		data = exception.appendInfo(data)
 		if len(data) > math.MaxUint16 {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 	}
 	data = append32(data, 0) // ReservedBlock1Size.
 	for _, exception := range exceptions {
 		data = exception.appendExtended(data)
 		if len(data) > math.MaxUint16-4 {
-			return nil, 0, false
+			return appointmentRecurrenceEncoding{}, false
 		}
 	}
 	data = append32(data, 0) // ReservedBlock2Size.
-	return core.Binary(data), recurrenceType, true
+	return appointmentRecurrenceEncoding{data: core.Binary(data), kind: recurrenceType, startDate: startDate, endDate: endDate}, true
 }
 
 const recurrenceOverrideSubject, recurrenceOverrideLocation = 1, 0x10

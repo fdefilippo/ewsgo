@@ -13,14 +13,14 @@ const mailUserEntryIDHeader = "\x00\x00\x00\x00\xdc\xa7\x40\xc8\xc0\x42\x10\x1a\
 
 // ownAddressBookEntryID encodes the already approved gateway LegacyDN; it
 // introduces no ID allocator or persistence. Callers must prove current GAL
-// visibility and that this is the authenticated mailbox, not an arbitrary GAL
-// object (whose native recipient type is not yet part of the core contract).
+// visibility and that this is the authenticated mailbox.
 func (n Namespace) ownAddressBookEntryID(identity core.Identity) ([]byte, error) {
 	return n.mailUserEntryID(identity)
 }
 
 // mailUserEntryID requires caller proof of a mailbox user: authenticated own
-// identity, or a native user grant matched to the currently visible directory.
+// identity, a typed native directory object or a native user grant matched to
+// the currently visible directory.
 // It must never classify an arbitrary GAL object as DT_MAILUSER.
 func (n Namespace) mailUserEntryID(identity core.Identity) ([]byte, error) {
 	mapped, err := n.Mailbox(identity)

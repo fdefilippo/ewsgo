@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net/mail"
+	"strconv"
 	"strings"
 
 	"ewsgo/internal/core"
@@ -25,6 +26,11 @@ func (m *mailbox) StageMeetingInvitation(folder core.ID, meeting core.MeetingInv
 	message, err := appointmentCreateMessage(spec.id, meeting.Appointment, uid)
 	if err != nil {
 		return nil, err
+	}
+	if meeting.HTML {
+		if part := message.child(mailNS, "mp"); part != nil {
+			*part = attr(*part, "ct", "text/html")
+		}
 	}
 	comp := message.child(mailNS, "inv").child(mailNS, "comp")
 	*comp = attr(attr(attr(*comp, "status", "CONF"), "fb", "B"), "transp", "O")
@@ -118,6 +124,10 @@ func appointmentMeeting(comp node, owner string) *core.AppointmentMeeting {
 	meeting := &core.AppointmentMeeting{
 		Organizer:      core.MeetingAttendee{Address: org.get("a"), Name: org.get("d")},
 		OwnerOrganizer: comp.get("isOrg") == "1" && strings.EqualFold(org.get("a"), owner),
+		InvitationSent: comp.get("neverSent") != "1" && (comp.get("method") == "REQUEST" || comp.get("method") == "CANCEL"),
+	}
+	if sequence, err := strconv.ParseUint(comp.get("seq"), 10, 31); err == nil {
+		meeting.Sequence = uint32(sequence)
 	}
 	for _, att := range comp.Children {
 		if att.XMLName.Space != mailNS || att.XMLName.Local != "at" || att.get("a") == "" ||
@@ -149,4 +159,35 @@ func appointmentMeeting(comp node, owner string) *core.AppointmentMeeting {
 		return nil
 	}
 	return meeting
+}
+
+func (m *mailbox) GetMeetingByUID(ctx context.Context, folder core.ID, uid string) (core.Appointment, error) {
+	if uid == "" || len(uid) > 255 {
+		return core.Appointment{}, core.ErrInvalid
+	}
+	detail, err := m.readAppointment(ctx, folder, "uid", uid, true)
+	if err != nil {
+		return core.Appointment{}, err
+	}
+	identity, err := appointmentIdentity(*detail, folder)
+	if err != nil {
+		return core.Appointment{}, err
+	}
+	comp := masterComponent(*detail)
+	if comp == nil {
+		return core.Appointment{}, core.ErrUnsupported
+	}
+	item, err := appointmentFromComponent(*detail, *comp, identity)
+	if err != nil {
+		return core.Appointment{}, err
+	}
+	if item.UID != uid {
+		return core.Appointment{}, core.ErrConflict
+	}
+	item.Participation = appointmentParticipation(*comp, m.owner)
+	item.Meeting = appointmentMeeting(*comp, m.owner)
+	if item.Meeting == nil {
+		return core.Appointment{}, core.ErrUnsupported
+	}
+	return item, nil
 }

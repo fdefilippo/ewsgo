@@ -12,7 +12,7 @@ import (
 )
 
 // Directory establishes an authenticated NSPI context and optionally resolves
-// native GAL DNs/properties. QueryRows, hierarchy, ANR and writes remain unsupported.
+// native GAL DNs, names and properties.
 func (t *SessionTransport) Directory(w http.ResponseWriter, r *http.Request, session core.Session) {
 	started := time.Now()
 	w.Header().Set("X-EWSGo-Profile", "nspi-bind-spike")
@@ -33,6 +33,7 @@ func (t *SessionTransport) Directory(w http.ResponseWriter, r *http.Request, ses
 	var bind Bind
 	var names DNToMId
 	var props GetProps
+	var resolve resolveNamesRequest
 	var tooManyProperties bool
 	switch op {
 	case "Bind":
@@ -63,6 +64,14 @@ func (t *SessionTransport) Directory(w http.ResponseWriter, r *http.Request, ses
 			if err != nil && !tooManyProperties {
 				code = 12
 			}
+		}
+	case "ResolveNames":
+		if !t.nativeDirectory {
+			code = 5
+		} else if v, err := parseResolveNames(data); err != nil {
+			code = 12
+		} else {
+			resolve = v
 		}
 	case "PING":
 		if len(data) != 0 {
@@ -142,6 +151,12 @@ func (t *SessionTransport) Directory(w http.ResponseWriter, r *http.Request, ses
 			var values, missing int
 			body, values, missing = t.directoryProperties(r.Context(), session, state, props)
 			recordPropertyResult(w, values, missing)
+		}
+	case "ResolveNames":
+		var matched int
+		body, matched = t.resolveDirectoryNames(r.Context(), session, state, resolve)
+		if recorder, ok := w.(interface{ RecordDirectoryResult(int, int) }); ok {
+			recorder.RecordDirectoryResult(len(resolve.names), matched)
 		}
 	case "Unbind":
 		body = append32(append32(append32(nil, 0), 1), 0) // NSPI UnbindSuccess (MS-OXCDATA 2.5).

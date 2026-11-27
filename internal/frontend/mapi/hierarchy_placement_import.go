@@ -197,6 +197,14 @@ func (s *hierarchyState) importMailFolderPlacement(ctx context.Context, session 
 		}
 		return s.importNewMailFolder(ctx, box, writer, fid, placement, request.change, incoming, snapshot.budget, now, creation, creating)
 	}
+	// Rejected imports have no need for a second native folder lookup, after
+	// the authorized snapshot has classified the source and checked for replay.
+	if current.distinguished {
+		return hierarchyImportDistinguished
+	}
+	if propertyProfile != nil {
+		return propertyProfile
+	}
 	before, err := box.Get(ctx, key.native)
 	if err != nil {
 		return err
@@ -212,9 +220,6 @@ func (s *hierarchyState) importMailFolderPlacement(ctx context.Context, session 
 		return core.ErrConflict
 	}
 
-	if propertyProfile != nil {
-		return propertyProfile
-	}
 	history, err := mergeFAIPCL(previous, incoming)
 	if err != nil {
 		return err

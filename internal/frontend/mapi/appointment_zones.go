@@ -6,6 +6,7 @@ package mapi
 import (
 	"encoding/binary"
 	"time"
+	"unicode/utf16"
 
 	"ewsgo/internal/core"
 )
@@ -13,6 +14,10 @@ import (
 // A floating appointment uses the effective rule in StartDisplay for both
 // bounds, regardless of the current rules for the zone name (MS-OXOCAL 3.1.5.5.1).
 func decodeAppointmentDisplayZone(data core.Binary) (core.AppointmentZone, error) {
+	return decodeAppointmentZoneDefinition(data, false)
+}
+
+func decodeAppointmentZoneDefinition(data core.Binary, recurring bool) (core.AppointmentZone, error) {
 	const ruleSize = 66
 	word := binary.LittleEndian.Uint16
 	if len(data) < 10 || data[0] != 2 || data[1] < 1 || data[1] > 2 || word(data[4:]) != 2 {
@@ -29,14 +34,18 @@ func decodeAppointmentDisplayZone(data core.Binary) (core.AppointmentZone, error
 		return core.AppointmentZone{}, core.ErrInvalid
 	}
 	var selected []byte
+	flag := uint16(2)
+	if recurring {
+		flag = 1
+	}
 	for len(rules) != 0 {
 		rule := rules[:ruleSize]
 		rules = rules[ruleSize:]
 		flags := word(rule[4:])
-		if flags&2 == 0 {
+		if flags&flag == 0 {
 			continue
 		}
-		if selected != nil || rule[0] != 2 || rule[1] < 1 || rule[1] > 2 || word(rule[2:]) != 0x3e || flags != 2 {
+		if selected != nil || rule[0] != 2 || rule[1] < 1 || rule[1] > 2 || word(rule[2:]) != 0x3e || flags&^3 != 0 {
 			return core.AppointmentZone{}, core.ErrInvalid
 		}
 		selected = rule
@@ -44,18 +53,40 @@ func decodeAppointmentDisplayZone(data core.Binary) (core.AppointmentZone, error
 	if selected == nil {
 		return core.AppointmentZone{}, core.ErrInvalid
 	}
-	bias := func(at int) int64 {
-		return int64(int32(binary.LittleEndian.Uint32(selected[at:])))
+	units := make([]uint16, nameUnits)
+	for i := range units {
+		units[i] = word(data[8+2*i:])
 	}
-	standard, daylight := -bias(22)-bias(26), -bias(22)-bias(30)
+	name := string(utf16.Decode(units))
+	if !validMailText(name) {
+		return core.AppointmentZone{}, core.ErrInvalid
+	}
+	zone, err := decodeAppointmentZoneRule(selected[22:34], selected[34:50], selected[50:66])
+	zone.Name = name
+	return zone, err
+}
+
+func decodeAppointmentZoneStruct(data core.Binary) (core.AppointmentZone, error) {
+	word := binary.LittleEndian.Uint16
+	if len(data) != 48 || word(data[12:]) != 0 || word(data[30:]) != 0 {
+		return core.AppointmentZone{}, core.ErrUnsupported
+	}
+	return decodeAppointmentZoneRule(data[:12], data[14:30], data[32:48])
+}
+
+func decodeAppointmentZoneRule(biases, standardDate, daylightDate []byte) (core.AppointmentZone, error) {
+	bias := func(at int) int64 {
+		return int64(int32(binary.LittleEndian.Uint32(biases[at:])))
+	}
+	standard, daylight := -bias(0)-bias(4), -bias(0)-bias(8)
 	if standard < -14*60 || standard > 14*60 || daylight < -14*60 || daylight > 14*60 {
 		return core.AppointmentZone{}, core.ErrInvalid
 	}
-	fromDaylight, err := decodeAppointmentTransition(selected[34:50])
+	fromDaylight, err := decodeAppointmentTransition(standardDate)
 	if err != nil {
 		return core.AppointmentZone{}, err
 	}
-	toDaylight, err := decodeAppointmentTransition(selected[50:66])
+	toDaylight, err := decodeAppointmentTransition(daylightDate)
 	if err != nil {
 		return core.AppointmentZone{}, err
 	}

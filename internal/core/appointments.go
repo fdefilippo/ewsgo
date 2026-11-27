@@ -141,6 +141,12 @@ type AppointmentContentsReader interface {
 	GetCalendarAppointment(context.Context, ID, ID) (Appointment, error)
 }
 
+// AppointmentOccurrenceReader resolves a live item by the original anchor,
+// even when an exception has changed its current time.
+type AppointmentOccurrenceReader interface {
+	GetAppointmentOccurrence(context.Context, ID, ID, time.Time, bool) (Appointment, error)
+}
+
 // Personal appointments have no external attendees. Invitations and
 // cancellations that send mail are separate operations.
 type AppointmentWriter interface {

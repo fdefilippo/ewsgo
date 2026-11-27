@@ -265,11 +265,11 @@ func (s *ramStore) planFolderCopy(ctx context.Context, observer core.MailFolderO
 		if err != nil {
 			return nil, err
 		}
-		if uint64(len(observation.MessageIDs)) != observation.MessageCount {
-			return nil, core.ErrConflict
-		}
 		if observation.MessageCount > core.MaxMailContentMessages {
 			return nil, core.ErrUnsupported
+		}
+		if uint64(len(observation.MessageIDs)) != observation.MessageCount {
+			return nil, core.ErrConflict
 		}
 		plan[i] = folderCopyPlan{folder: core.Object{ID: folder.ID, Parent: folder.Parent,
 			Properties: core.Properties{core.DisplayName: name}}, messages: observation.MessageIDs}

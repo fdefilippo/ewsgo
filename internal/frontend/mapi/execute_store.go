@@ -16,7 +16,10 @@ import (
 
 // EnableRAMStore opts into the approved laboratory object model. Configure
 // before serving requests. Restart loses replicas, FIDs and server handles.
-func (t *SessionTransport) EnableRAMStore() { t.stores = newRAMStores() }
+func (t *SessionTransport) EnableRAMStore() {
+	t.stores = newRAMStores()
+	t.stores.namespace = t.namespace
+}
 
 // EnableNamedPropertyPersistence is configured after EnableRAMStore, before
 // accepting client requests. It preserves named-property IDs across restarts.

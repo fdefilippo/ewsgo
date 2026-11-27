@@ -153,7 +153,13 @@ func (d *mailDraft) submit(ctx context.Context, session core.Session, sender mai
 		if !validSavedMailDraft(native, d.folder) || native.ID != d.staged.ID || native.Revision != d.staged.Revision {
 			return core.SendObservation{}, core.ErrConflict
 		}
-		evidence, err := sender.SendDraft(ctx, session, native)
+		var evidence core.SendObservation
+		if d.meeting.Class != "" {
+			err = d.submitMeeting(ctx, session, native)
+			core.RecordActivity(ctx, core.Activity{Layer: "mapi", Operation: "SubmitMeeting", Result: core.ActivityOutcome(err)})
+		} else {
+			evidence, err = sender.SendDraft(ctx, session, native)
+		}
 		if err != nil {
 			if errors.Is(err, core.ErrOutcomeUnknown) {
 				result = outboxUncertain

@@ -38,9 +38,34 @@ func (t *SessionTransport) executeFAI(ctx context.Context, session core.Session,
 	if code != 0 {
 		return fail(code)
 	}
-	if object.message != nil && object.message.appointmentDraft != nil && (op.AppointmentSet || op.ID == 0x0c) {
+	if object.message != nil && object.message.calendarException != nil && (isSetPropertiesROP(op.ID) || op.ID == 0x0c) {
+		attachment := object.message.calendarException
+		if err := attachment.authorize(ctx, session); err != nil {
+			return fail(attachmentError(err))
+		}
+		if err := attachment.editable(); err != nil {
+			return fail(attachmentError(err))
+		}
+		if isSetPropertiesROP(op.ID) {
+			if op.ID == ropSetPropertiesNoReplicate || object.message.embeddedReadOnly {
+				return fail(accessDenied)
+			}
+			problems := attachment.calendar.setMessage(&object.binding.store.named, op.FAISet)
+			return propertyProblemsResponse(op.ID, index, problems)
+		}
+		mode, valid := faiSaveMode(op.Flags)
+		if !valid || object.message.embeddedReadOnly {
+			return fail(accessDenied)
+		}
+		if err := attachment.calendar.saveMessage(); err != nil {
+			return fail(attachmentError(err))
+		}
+		object.message.embeddedReadOnly = mode == 1
+		return binary.LittleEndian.AppendUint64(append(fail(0), op.Input), object.message.mid)
+	}
+	if object.message != nil && object.message.appointmentDraft != nil && (op.AppointmentSet || op.MailDraftSet || op.ID == 0x0c) {
 		draft := object.message.appointmentDraft
-		if op.AppointmentSet {
+		if op.AppointmentSet || op.MailDraftSet {
 			if op.ID == ropSetPropertiesNoReplicate {
 				return fail(NotSupported)
 			}
@@ -187,6 +212,11 @@ func (t *SessionTransport) executeFAI(ctx context.Context, session core.Session,
 			}
 			handles[op.Output] = handle
 			return fail(0)
+		}
+		// Outlook keeps synchronization error reports in its local cache.
+		// Decline an upload collector before it can start importing those rows.
+		if object.binding.isSyncIssuesFolder(object.fid) {
+			return fail(NotSupported)
 		}
 		collector, err := newFAICollector(ctx, session, object.binding.store, object.fid)
 		if err != nil {

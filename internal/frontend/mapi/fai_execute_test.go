@@ -77,6 +77,52 @@ func newFAIExecuteFixture(t *testing.T) (*ostFixture, *messageFixtureMailbox, *r
 	return f, box, object.binding.store
 }
 
+func TestContentsCollectorSkipsLocalSyncReports(t *testing.T) {
+	f, _, store := newFAIExecuteFixture(t)
+	object, _ := f.state.mailbox.object(f.handles[1], 4)
+	makeFolder := func(parent uint64, name string) uint64 {
+		fid, code := store.createFolder(t.Context(), f.session, parent, createFolderRequest{name: name})
+		if code != 0 {
+			t.Fatalf("create folder: %#x", code)
+		}
+		return fid
+	}
+	root := makeFolder(f.fids[IPMSubtree], "Sync issues")
+	local := makeFolder(root, "Local failures")
+	other := makeFolder(root, "Ordinary child")
+	stale := makeFolder(root, "Other replica")
+	entry := func(fid uint64) []byte {
+		return marshalFolderEntryID(object.binding.mailboxGUID, store.replica, fid)
+	}
+	badEntry := entry(stale)
+	badEntry[22] ^= 1
+	slots := [][]byte{entry(f.fids[SentItems]), entry(root), entry(local), badEntry, entry(other)}
+	metadata := append32(nil, uint32(len(slots)))
+	for _, slot := range slots {
+		metadata = binary.LittleEndian.AppendUint16(metadata, uint16(len(slot)))
+		metadata = append(metadata, slot...)
+	}
+	if _, code := store.setMetadata(t.Context(), f.session, f.fids[Inbox], folderMetadata{additionalEntryIDs: metadata}); code != 0 {
+		t.Fatalf("set folder references: %#x", code)
+	}
+	faiRunOK(t, f, []byte{1, 4, 2})
+	for _, fid := range []uint64{root, local, other, stale, f.fids[SentItems]} {
+		faiRunOK(t, f, folderOperation(fid, 4, 0, 1))
+		wire, _ := f.run([]byte{0x7e, 4, 1, 2, 1})
+		want := uint32(0)
+		if fid == root || fid == local {
+			want = NotSupported
+		}
+		if got := binary.LittleEndian.Uint32(wire[2:]); got != want {
+			t.Fatalf("collector return code %#x, want %#x", got, want)
+		}
+		if want == 0 {
+			faiRunOK(t, f, []byte{1, 4, 2})
+		}
+		faiRunOK(t, f, []byte{1, 4, 1})
+	}
+}
+
 func TestFAIImportDoesNotConsumeATransferSlot(t *testing.T) {
 	f, _, _ := newFAIExecuteFixture(t)
 	// Keep the uploader and three other contexts live while staging its message.

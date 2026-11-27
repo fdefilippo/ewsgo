@@ -42,6 +42,18 @@ const (
 	importAppointmentSaveCollector
 	importAppointmentSaveNative
 	importAppointmentSaveZone
+	importAppointmentRecurrenceDecode
+	importAppointmentRecurrenceRule
+	importAppointmentRecurrenceDates
+	importAppointmentRecurrenceException
+	importAppointmentRecurrenceAttachment
+	importAppointmentSaveMessageFlags
+	importAppointmentSaveMeetingState
+	importAppointmentSaveReminder
+	importAppointmentSaveNativeProfile
+	importAppointmentExceptionWallTime
+	importAppointmentExceptionBounds
+	importAppointmentExceptionEmbeddedAnchor
 )
 
 type normalImportRejection struct{ reason importRejection }
@@ -108,6 +120,14 @@ func (r importRejection) label() string {
 		return "import_appointment_save_decode"
 	case importAppointmentSaveProfile:
 		return "import_appointment_save_profile"
+	case importAppointmentSaveMessageFlags:
+		return "import_appointment_save_message_flags"
+	case importAppointmentSaveMeetingState:
+		return "import_appointment_save_meeting_state"
+	case importAppointmentSaveReminder:
+		return "import_appointment_save_reminder"
+	case importAppointmentSaveNativeProfile:
+		return "import_appointment_save_native_profile"
 	case importAppointmentSaveStartWhole:
 		return "import_appointment_save_start_whole"
 	case importAppointmentSaveEndWhole:
@@ -128,6 +148,22 @@ func (r importRejection) label() string {
 		return "import_appointment_save_native"
 	case importAppointmentSaveZone:
 		return "import_appointment_save_zone"
+	case importAppointmentRecurrenceDecode:
+		return "import_appointment_recurrence_decode"
+	case importAppointmentRecurrenceRule:
+		return "import_appointment_recurrence_rule"
+	case importAppointmentRecurrenceDates:
+		return "import_appointment_recurrence_dates"
+	case importAppointmentRecurrenceException:
+		return "import_appointment_recurrence_exception"
+	case importAppointmentRecurrenceAttachment:
+		return "import_appointment_recurrence_attachment"
+	case importAppointmentExceptionWallTime:
+		return "import_appointment_exception_wall_time"
+	case importAppointmentExceptionBounds:
+		return "import_appointment_exception_bounds"
+	case importAppointmentExceptionEmbeddedAnchor:
+		return "import_appointment_exception_embedded_anchor"
 	default:
 		return "import_other_profile"
 	}

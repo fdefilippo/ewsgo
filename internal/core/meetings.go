@@ -16,8 +16,15 @@ const (
 )
 
 var (
-	MeetingMessageType = Key{Set: "f8b556e0-5d21-4ce8-9043-05e3d3dd7b90", Name: "meetingMessageType"}
-	MeetingMessageUID  = Key{Set: "f8b556e0-5d21-4ce8-9043-05e3d3dd7b90", Name: "meetingMessageUID"}
+	MeetingMessageType       = Key{Set: "f8b556e0-5d21-4ce8-9043-05e3d3dd7b90", Name: "meetingMessageType"}
+	MeetingMessageUID        = Key{Set: "f8b556e0-5d21-4ce8-9043-05e3d3dd7b90", Name: "meetingMessageUID"}
+	MeetingMessageStart      = Key{Set: MeetingMessageType.Set, Name: "meetingMessageStart"}
+	MeetingMessageEnd        = Key{Set: MeetingMessageType.Set, Name: "meetingMessageEnd"}
+	MeetingMessageLocation   = Key{Set: MeetingMessageType.Set, Name: "meetingMessageLocation"}
+	MeetingMessageAllDay     = Key{Set: MeetingMessageType.Set, Name: "meetingMessageAllDay"}
+	MeetingMessageSequence   = Key{Set: MeetingMessageType.Set, Name: "meetingMessageSequence"}
+	MeetingCalendarProcessed = Key{Set: MeetingMessageType.Set, Name: "meetingCalendarProcessed"}
+	MeetingResponseRequested = Key{Set: MeetingMessageType.Set, Name: "meetingResponseRequested"}
 )
 
 type MeetingAttendee struct {
@@ -36,13 +43,16 @@ type AppointmentMeeting struct {
 	Participants    []MeetingParticipation
 	OwnerOrganizer  bool
 	OwnerReply      MeetingReplyChoice
+	InvitationSent  bool
 	RequestResponse bool
+	Sequence        uint32
 }
 
 type MeetingInvitation struct {
 	Appointment      Appointment
 	Attendees        []MeetingAttendee
 	RequestResponses bool
+	HTML             bool `json:",omitempty"`
 }
 
 // MeetingInvitationBackend prepares a single organizer submission. The
@@ -79,4 +89,10 @@ type MeetingReply struct {
 
 type MeetingReplyBackend interface {
 	StageMeetingReply(context.Context, Object, MeetingReply) (SendAttempt, error)
+}
+
+// MeetingAppointmentReader locates a native meeting in the authorized folder
+// by its protocol-independent calendar UID, including before any MAPI sync.
+type MeetingAppointmentReader interface {
+	GetMeetingByUID(context.Context, ID, string) (Appointment, error)
 }

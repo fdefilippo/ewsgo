@@ -427,6 +427,9 @@ func openPropertyStream(ctx context.Context, session core.Session, objects *mail
 		return result(NotSupported)
 	}
 	if object.attachment != nil && object.attachment.draft != nil {
+		if object.attachment.draft.calendar != nil {
+			return result(NotSupported)
+		}
 		return openDraftAttachmentStream(ctx, session, objects, object, op, handles)
 	}
 	if object.message != nil && object.message.draft != nil && op.Stream.tag == rwRulesStreamTag {

@@ -13,8 +13,8 @@ func faiSaveMode(flags byte) (byte, bool) {
 		return mode, true
 	case 6:
 		// Outlook sends KeepOpenReadWrite and ForceSave together (0x0E
-		// with an ignored bit). Preserve the revision check when the
-		// flags are combined.
+		// with an ignored bit). Gromox accepts the save but only bypasses
+		// revision checks for standalone ForceSave. Preserve that check.
 		return 2, true
 	default:
 		return 0, false

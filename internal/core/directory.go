@@ -10,6 +10,7 @@ import "context"
 type DirectoryEntry struct {
 	Identity    Identity
 	DisplayName string
+	MailUser    bool // The backend identified this object as a mailbox user.
 }
 
 const MaxDirectoryEntries = 1000

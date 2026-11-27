@@ -144,7 +144,7 @@ func captureContentsTable(ctx context.Context, session core.Session, binding sto
 	}
 	// Account map/row/slice overhead and the maximum retained column list.
 	used := 1024 + 4*maxTableColumns
-	if err = table.appendMessageRows(ctx, binding, snapshot, nil, &used); err != nil {
+	if err = table.appendMessageRows(ctx, session.Identity(), binding, snapshot, nil, &used); err != nil {
 		return fail(err)
 	}
 	if _, err = store.scopedMessageAnchor(ctx, session, fid, table.associated, table.special); err != nil {
@@ -159,7 +159,7 @@ func captureContentsTable(ctx context.Context, session core.Session, binding sto
 	return table, nil
 }
 
-func (table *contentsTable) appendMessageRows(ctx context.Context, binding storeBinding, snapshot messageSnapshot, restriction *contentsRestriction, used *int) error {
+func (table *contentsTable) appendMessageRows(ctx context.Context, identity core.Identity, binding storeBinding, snapshot messageSnapshot, restriction *contentsRestriction, used *int) error {
 	store := binding.store
 	sort.Slice(snapshot.messages, func(i, j int) bool { return snapshot.messages[i].mid < snapshot.messages[j].mid })
 	for _, row := range snapshot.messages {
@@ -182,12 +182,12 @@ func (table *contentsTable) appendMessageRows(ctx context.Context, binding store
 			addContentsRowMetadata(&projected, row)
 		} else if row.indexedMIME() {
 			var err error
-			projected, err = indexedContentsPayload(row)
+			projected, err = store.indexedContentsPayload(row, identity)
 			if err != nil {
 				return err
 			}
 		} else {
-			change, err := store.projectContentsRow(row)
+			change, err := store.projectContentsRow(row, identity)
 			if err != nil {
 				return err
 			}

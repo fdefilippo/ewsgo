@@ -84,19 +84,12 @@ func (t *SessionTransport) directoryProperties(ctx context.Context, session core
 		}
 	}
 	project := func(tag uint32, codepage uint32) addressBookValue {
-		if uint16(tag>>16) == 0x0fff {
-			kind := uint16(tag)
-			if entry.Identity.Scope == session.Identity().Scope && (kind == 0 || kind == 0x0102) {
-				if request.Flags&0x00000002 != 0 { // fEphID, MS-OXNSPI 3.1.4.1.7.
-					raw := append([]byte{0x87, 0, 0, 0}, state.directory.guid[:]...)
-					raw = append32(append32(append32(raw, 1), 0), request.State.CurrentRec)
-					return addressBookValue{tag: tag&0xffff0000 | 0x0102, data: appendBlob([]byte{0xff}, raw)}
-				}
-				if raw, err := t.namespace.ownAddressBookEntryID(entry.Identity); err == nil {
-					return addressBookValue{tag: tag&0xffff0000 | 0x0102, data: appendBlob([]byte{0xff}, raw)}
-				}
-			}
-			return missingProperty(tag)
+		entry.MailUser = entry.MailUser || entry.Identity.Scope == session.Identity().Scope
+		if tag>>16 == 0x0fff && entry.MailUser && (uint16(tag) == 0 || uint16(tag) == 0x0102) && request.Flags&0x00000002 != 0 {
+			// fEphID, MS-OXNSPI 3.1.4.1.7.
+			raw := append([]byte{0x87, 0, 0, 0}, state.directory.guid[:]...)
+			raw = append32(append32(append32(raw, 1), 0), request.State.CurrentRec)
+			return addressBookValue{tag: tag&0xffff0000 | 0x0102, data: appendBlob([]byte{0xff}, raw)}
 		}
 		return t.directoryProperty(entry, tag, codepage)
 	}
@@ -152,15 +145,26 @@ func unsupportedString8Codepage(cp uint32, tags []uint32) bool {
 	return false
 }
 
-// Only native strings and identities owned by EWSGo are mapped. In particular,
-// native GAL presence alone does not establish a recipient's Exchange object
-// type, EntryID layout, home database or permission to open that mailbox.
+// Object type and EntryID require a positively identified mailbox user.
 func (t *SessionTransport) directoryProperty(entry core.DirectoryEntry, tag, cp uint32) addressBookValue {
 	kind := uint16(tag)
 	id := uint16(tag >> 16)
 	mapped, err := t.namespace.Mailbox(entry.Identity)
 	if err != nil {
 		return missingProperty(tag)
+	}
+	if id == 0x0fff && entry.MailUser && (kind == 0 || kind == 0x0102) {
+		if raw, err := t.namespace.mailUserEntryID(entry.Identity); err == nil {
+			return addressBookValue{tag: tag&0xffff0000 | 0x0102, data: appendBlob([]byte{0xff}, raw)}
+		}
+	}
+	if entry.MailUser && (kind == 0 || kind == 0x0003) {
+		switch id {
+		case 0x0ffe:
+			return addressBookValue{tag: 0x0ffe0003, data: append32(nil, 6)} // MAPI_MAILUSER.
+		case 0x3900:
+			return addressBookValue{tag: 0x39000003, data: append32(nil, 0)} // DT_MAILUSER.
+		}
 	}
 	if id == 0x8c6d && (kind == 0 || kind == 0x0102) {
 		guid, err := t.namespace.AddressBookGUID(entry.Identity.Scope)

@@ -13,7 +13,6 @@ import (
 	"net/mail"
 	"slices"
 	"strings"
-	"time"
 
 	"ewsgo/internal/core"
 )
@@ -139,7 +138,7 @@ func (h *Handler) submitMeetingInvitation(ctx context.Context, scope core.Scope,
 	payload := sha256.Sum256(raw)
 	key := sha256.Sum256(append([]byte("meeting invitation content\x00"), payload[:]...))
 	if uid != "" {
-		key = sha256.Sum256([]byte("meeting invitation UID\x00" + uid))
+		key = core.MeetingInvitationKey(uid)
 	}
 	store := h.journal.store
 	mailbox, err := store.BindMailbox(ctx, scope, h.journal.backendInstance)
@@ -174,50 +173,5 @@ func (h *Handler) submitMeetingInvitation(ctx context.Context, scope core.Scope,
 
 func (h *Handler) submitMeetingRequest(ctx context.Context, mailboxID string, key, payload [32]byte,
 	stage func(context.Context) (core.SendAttempt, error)) (core.ID, error) {
-	store := h.journal.store
-	input := core.SendInput{MIMEDigest: payload}
-	intent, err := store.PrepareCorrelatedSend(ctx, mailboxID, input, key)
-	if err != nil {
-		return "", err
-	}
-	var attempt core.SendAttempt
-	if intent.State == core.SendReady {
-		attempt, err = stage(ctx)
-		if err != nil {
-			// Another caller may have completed the same operation during
-			// our read of the pre-mutation revision.
-			current, readErr := store.SendIntent(ctx, mailboxID, intent.ID)
-			if readErr != nil || current.State == core.SendReady {
-				return "", err
-			}
-		}
-	}
-	intent, claimed, err := store.ClaimSend(ctx, mailboxID, intent.ID, input)
-	if err != nil {
-		return "", err
-	}
-	id := intent.SentID
-	if claimed {
-		id, err = attempt(ctx)
-		state := core.SendConfirmed
-		if errors.Is(err, core.ErrSendRejected) {
-			state, id = core.SendFailed, ""
-		} else if err != nil || id == "" {
-			return "", core.ErrOutcomeUnknown
-		}
-		commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := store.CompleteSend(commitCtx, mailboxID, intent.ID, state, id); err != nil {
-			return "", core.ErrOutcomeUnknown
-		}
-		intent.State = state
-	}
-	switch intent.State {
-	case core.SendFailed:
-		return "", core.ErrSendRejected
-	case core.SendConfirmed:
-		return id, nil
-	default:
-		return "", core.ErrOutcomeUnknown
-	}
+	return core.SubmitMeetingRequest(ctx, h.journal.store, mailboxID, key, payload, stage)
 }

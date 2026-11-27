@@ -56,7 +56,7 @@ func TestMailProjectionMessageFlags(t *testing.T) {
 					core.MessageSize:    core.Integer(len(raw)),
 				},
 			}}
-			indexed, err := indexedContentsPayload(row)
+			indexed, err := (&ramStore{}).indexedContentsPayload(row, core.Identity{})
 			if err != nil {
 				t.Fatal(err)
 			}

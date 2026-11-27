@@ -129,6 +129,22 @@ func objectNamedPropertyIDs(ctx context.Context, session core.Session, object se
 		if row.associated || row.special != 0 {
 			return store.named.queryIDs(row.object.Properties, op), 0
 		}
+		if nativeMeetingKind(row.object.Properties) != 0 {
+			if err := registerMeetingNames(ctx, &store.named); err != nil {
+				return nil, storeError(err)
+			}
+			values := contentsValues{}
+			projectMeetingProperties(values, row.object.Properties)
+			properties := make(core.Properties)
+			for _, fields := range [][]calendarNamedProperty{appointmentNamedProperties, meetingNamedProperties} {
+				for _, field := range fields {
+					if value, ok := values[field.property]; ok {
+						properties[field.key] = value
+					}
+				}
+			}
+			return store.named.queryIDs(properties, op), 0
+		}
 	case object.attachment != nil:
 		lease, err := store.reserveContentsPeak(ctx, openMessageWorkspace)
 		if err != nil {
@@ -143,8 +159,7 @@ func objectNamedPropertyIDs(ctx context.Context, session core.Session, object se
 			return nil, storeError(err)
 		}
 	}
-	// Native mail, attachments, folders and the store have only standard
-	// MAPI properties in their current projections. Backend metadata is private.
+	// Backend metadata is private.
 	return nil, 0
 }
 

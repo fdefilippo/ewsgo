@@ -59,6 +59,7 @@ func TestHierarchyImportExecuteReportsRefusalWithoutChangingWire(t *testing.T) {
 		{property, "hierarchy_import_property"},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
+			before := box.pointReads
 			f.transport.EnableUnknownPropertyTrace()
 			f.transport.synchronizationOptionsTrace = false
 			withoutTrace, counts := f.run(tc.wire)
@@ -75,6 +76,9 @@ func TestHierarchyImportExecuteReportsRefusalWithoutChangingWire(t *testing.T) {
 			requireImportDiagnostic(t, counts.synchronizationOptions, tc.reason)
 			labels := counts.execution.HierarchyImportProperties().Tags
 			if tc.reason == "hierarchy_import_property" {
+				if box.pointReads != before+2 { // One root check per legacy catalogue read.
+					t.Fatal("unsupported hierarchy properties caused a redundant source read")
+				}
 				if len(labels) != 1 || labels[0] != "0x3004001e" {
 					t.Fatalf("unexpected hierarchy property labels %v", labels)
 				}
@@ -116,8 +120,14 @@ func TestHierarchyImportIgnoresReplayedProtectedDescendants(t *testing.T) {
 
 type placementTestMailbox struct {
 	*stateMailbox
-	updates int
-	fail    bool
+	updates    int
+	pointReads int
+	fail       bool
+}
+
+func (b *placementTestMailbox) Get(ctx context.Context, id core.ID) (core.Object, error) {
+	b.pointReads++
+	return b.stateMailbox.Get(ctx, id)
 }
 
 func (*placementTestMailbox) CreateMailFolder(context.Context, core.MailFolderPlacement) (core.Object, error) {

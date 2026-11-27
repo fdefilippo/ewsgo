@@ -21,10 +21,10 @@ EWSGo è in anteprima. Le prove su Zimbra FOSS 10.1.20 hanno verificato la
 sincronizzazione della posta con MailCraft CLI e l’accesso da Outlook classico
 LTSC 2021 in modalità online e cache. Le prove hanno coperto anche contatti e
 appuntamenti personali in Outlook, ed eventi ricorrenti e inviti via EWS.
-Restano da qualificare le scritture sulle ricorrenze e le operazioni sugli
-inviti da Outlook. Una prova successiva con Outlook in modalità cache ha
-verificato la sincronizzazione di 340 messaggi da un Cestino Zimbra contenente
-posta, contatti e appuntamenti.
+Le prove hanno verificato anche la modifica delle ricorrenze e le risposte
+agli inviti da Outlook classico, oltre alla sincronizzazione di un Cestino
+Zimbra misto con 340 messaggi. La prima sincronizzazione in cache può
+richiedere più tempo della riapertura di un profilo Outlook già popolato.
 
 Il backend Zimbra include `ewsgo-rules` per le regole di Outlook, le cartelle
 di ricezione e le azioni differite. I sorgenti e la guida di installazione
