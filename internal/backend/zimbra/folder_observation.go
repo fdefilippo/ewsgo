@@ -36,13 +36,26 @@ func (m *mailbox) observeFolderContents(ctx context.Context, folder core.ID, pri
 		return core.MailFolderObservation{}, semanticError(err)
 	}
 	result := core.MailFolderObservation{Sequence: before.Sequence, Children: before.Children, MessageCount: before.MessageCount}
-	if priorSequence != nil && *priorSequence == before.Sequence || before.MessageCount == 0 && priorSequence == nil {
+	if priorSequence != nil && *priorSequence == before.Sequence {
+		result.CountOmitted = before.UntypedCount
+		return result, nil
+	}
+	if before.MessageCount == 0 && priorSequence == nil {
 		return result, nil
 	}
 	if before.MessageCount > core.MaxMailContentIndexItems {
 		return core.MailFolderObservation{}, ErrLimit
 	}
-	ids, err := m.folderContentsIDs(ctx, folder, native, role)
+	var ids []core.ID
+	if role == 0 {
+		var entries []mailIndexEntry
+		entries, err = m.native.verifiedMailIndex(ctx, native, before.MessageCount)
+		for _, entry := range entries {
+			ids = append(ids, core.ID("m:"+entry.id))
+		}
+	} else {
+		ids, err = m.folderContentsIDs(ctx, folder, role)
+	}
 	if err != nil {
 		return core.MailFolderObservation{}, semanticError(err)
 	}
@@ -56,14 +69,11 @@ func (m *mailbox) observeFolderContents(ctx context.Context, folder core.ID, pri
 	if before != after {
 		return core.MailFolderObservation{}, core.ErrConflict
 	}
-	if uint64(len(ids)) != after.MessageCount {
-		if role != 0 {
-			// Native folder counts may include objects outside the supported
-			// projection. A mismatch must not be used to infer removals.
-			return core.MailFolderObservation{}, core.ErrUnsupported
-		}
-		return core.MailFolderObservation{}, core.ErrConflict
+	if role != 0 && uint64(len(ids)) != after.MessageCount {
+		// A mismatch in a typed folder must not be used to infer removals.
+		return core.MailFolderObservation{}, core.ErrUnsupported
 	}
+	result.MessageCount = uint64(len(ids))
 	slices.Sort(ids)
 	result.MessageIDs = ids
 	return result, nil
@@ -80,7 +90,7 @@ func contentsSpecialRole(native string, groupware bool) core.SpecialFolderKind {
 	return 0
 }
 
-func (m *mailbox) folderContentsIDs(ctx context.Context, folder core.ID, native string, role core.SpecialFolderKind) ([]core.ID, error) {
+func (m *mailbox) folderContentsIDs(ctx context.Context, folder core.ID, role core.SpecialFolderKind) ([]core.ID, error) {
 	switch role {
 	case core.ContactsFolder:
 		cards, err := m.ListContacts(ctx, folder)
@@ -103,15 +113,7 @@ func (m *mailbox) folderContentsIDs(ctx context.Context, folder core.ID, native 
 		}
 		return ids, nil
 	}
-	entries, err := m.native.mailIndexEntries(ctx, native)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]core.ID, len(entries))
-	for i, entry := range entries {
-		ids[i] = core.ID("m:" + entry.id)
-	}
-	return ids, nil
+	return nil, core.ErrUnsupported
 }
 
 func (m *mailbox) ReadMailFolderMarkers(ctx context.Context, folders []core.ID) (map[core.ID]core.MailFolderMarker, error) {
@@ -196,7 +198,7 @@ func (tree nativeMailFolderTree) folderContentsMarker(native string, children []
 		_, _ = io.WriteString(hash, id+"\x00"+child.Name+"\x00"+child.View+"\x00"+revision+"\x00")
 	}
 	return core.MailFolderMarker{
-		Sequence: *target.ContentsSequence, MessageCount: *target.ItemCount,
+		Sequence: *target.ContentsSequence, MessageCount: *target.ItemCount, UntypedCount: role == 0,
 		Children: [32]byte(hash.Sum(nil)),
 	}, nil
 }

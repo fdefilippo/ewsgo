@@ -452,7 +452,7 @@ func (s *ramStore) commitHierarchy(ctx context.Context, nodes []hierarchyNode, a
 			}
 		}
 	}
-	if s.mappingCountLocked()+needed > maxRAMMappings || budget > maxHierarchyBytes || s.next > maxGlobalCount || uint64(needed+changed) > maxGlobalCount-s.next {
+	if s.mappingCountLocked()+needed > s.mappingLimit() || budget > maxHierarchyBytes || s.next > maxGlobalCount || uint64(needed+changed) > maxGlobalCount-s.next {
 		return hierarchySnapshot{}, core.ErrUnsupported
 	}
 	byKey, byFID := make(map[folderKey]uint64, len(s.byKey)+needed), make(map[uint64]folderKey, len(s.byFID)+needed)

@@ -88,7 +88,7 @@ func (h *Handler) cancelMeeting(ctx context.Context, session core.Session, item 
 		if current.Identity.ID != ref.ID || current.Identity.Parent != ref.Parent || current.Identity.Kind != core.AppointmentItem {
 			return nil, core.ErrNotFound
 		}
-		if h.appointmentChangeKey(scope, current) != prior {
+		if h.changeKey(scope, current.Identity) != prior {
 			return nil, core.ErrConflict
 		}
 		return backend.StageMeetingCancellation(ctx, current, cancellation)

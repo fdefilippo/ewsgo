@@ -243,3 +243,62 @@ func TestCursorScopeExpiryAndRetentionBounds(t *testing.T) {
 		t.Fatal("pending data unbounded")
 	}
 }
+
+func TestEphemeralSyncBoundsAndMailboxIsolation(t *testing.T) {
+	const folder core.ID = "f:2"
+	h := NewWithPageSize(512)
+	folderObject := core.Object{ID: folder, Kind: core.Folder}
+	mailbox := func(account string, pages []core.SyncPage) (pullFixtureSession, *fixtureMailbox) {
+		box := &fixtureMailbox{objects: map[core.ID]core.Object{folder: folderObject}, pages: pages}
+		return pullFixtureSession{
+			Session:  &testSession{box: box},
+			identity: core.Identity{Scope: core.Scope{Backend: "synthetic", Account: account}},
+		}, box
+	}
+	objects := make([]core.Object, 2001)
+	for i := range objects {
+		objects[i] = core.Object{ID: core.ID("m:" + strconv.Itoa(i+1)), Parent: folder, Kind: core.Message, Revision: 1}
+	}
+	alice, aliceBox := mailbox("alice", []core.SyncPage{
+		{Objects: objects[:2000], Next: "alice-first", More: true}, {Objects: objects[2000:], Next: "alice-second"},
+	})
+	bob, bobBox := mailbox("bob", []core.SyncPage{{Objects: objects[:1], Next: "bob-first"}})
+	syncOp := func(s core.Session, cursor string) node {
+		op := el(messages, "SyncFolderItems", "",
+			el(messages, "SyncFolderId", "", at(el(types, "FolderId", ""), "Id", h.encode(s.Identity().Scope, folder))),
+			el(messages, "MaxChangesReturned", "512"))
+		if cursor != "" {
+			op.Children = append(op.Children, el(messages, "SyncState", cursor))
+		}
+		return op
+	}
+	cursor := ""
+	for i := range 4 {
+		result := serveWriteTest(t, h, alice, syncOp(alice, cursor), "NoError")
+		changes := result.find(messages, "Changes")
+		if len(changes.Children) != min(512, 2000-512*i) || aliceBox.calls != 1 {
+			t.Fatal("wrong page boundary or native view was refetched")
+		}
+		cursor = result.find(messages, "SyncState").Text
+		if i == 0 {
+			serveWriteTest(t, h, bob, syncOp(bob, cursor), "ErrorInvalidSyncStateData")
+			if bobBox.calls != 0 {
+				t.Fatal("foreign cursor reached backend")
+			}
+			serveWriteTest(t, h, bob, syncOp(bob, ""), "NoError")
+			restarted := NewWithPageSize(512)
+			restarted.key = h.key
+			serveWriteTest(t, restarted, alice, syncOp(alice, cursor), "ErrorInvalidSyncStateData")
+		}
+	}
+	result := serveWriteTest(t, h, alice, syncOp(alice, cursor), "ErrorDataSizeLimitExceeded")
+	if result.find(messages, "SyncState") != nil || aliceBox.calls != 2 || bobBox.calls != 1 {
+		t.Fatal("oversized sync returned usable state or affected another mailbox")
+	}
+	h.mu.Lock()
+	state := h.states[cursor]
+	state.expires = time.Now().Add(-time.Second)
+	h.states[cursor] = state
+	h.mu.Unlock()
+	serveWriteTest(t, h, alice, syncOp(alice, cursor), "ErrorInvalidSyncStateData")
+}

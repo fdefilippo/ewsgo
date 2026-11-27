@@ -136,3 +136,38 @@ func TestMailDraftReconcilesAfterLostReplyAndRestart(t *testing.T) {
 	session := draftFixtureSession{box: &draftFixtureMailbox{}}
 	verifyLostDraftReply(t, t.Context(), session, "drafts", "000102030405060708090a0b0c0d0e0f", []byte("Subject: fixture\r\n\r\nPlain fixture\r\n"))
 }
+
+func TestConfirmedDraftCreationRetryAfterRestartAndRemoval(t *testing.T) {
+	const reference = "100102030405060708090a0b0c0d0e0f"
+	mime := []byte("Subject: fixture\r\n\r\nDraft\r\n")
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "retention.sqlite")
+	store, err := sqlite.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box := &draftFixtureMailbox{}
+	account := draftFixtureSession{box: box}
+	creator := MailDraftCreator{store, "retention-test"}
+	saved, err := creator.CreateMailDraft(ctx, account, "drafts", reference, mime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = sqlite.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	creator.store = store
+	retry, err := creator.CreateMailDraft(ctx, account, "drafts", reference, mime)
+	if err != nil || retry.ID != saved.ID || len(box.match) != 1 {
+		t.Fatalf("confirmed draft retry returned %v with %d candidates", err, len(box.match))
+	}
+	box.match = nil
+	if _, err := creator.CreateMailDraft(ctx, account, "drafts", reference, mime); !errors.Is(err, core.ErrOutcomeUnknown) || len(box.match) != 0 {
+		t.Fatalf("removed draft retry returned %v with %d candidates", err, len(box.match))
+	}
+}

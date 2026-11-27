@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 
@@ -17,12 +18,16 @@ type creationTestMailbox struct {
 	placementTestMailbox
 	creates int
 	failure string
+	reject  error
 	before  func()
 }
 
 func (b *creationTestMailbox) CreateMailFolder(_ context.Context, placement core.MailFolderPlacement) (core.Object, error) {
 	b.creates++
 	b.before()
+	if b.reject != nil {
+		return core.Object{}, b.reject
+	}
 	if b.failure == "rejected" {
 		return core.Object{}, core.ErrConflict
 	}
@@ -38,6 +43,46 @@ func (b *creationTestMailbox) CreateMailFolder(_ context.Context, placement core
 		return core.Object{}, context.DeadlineExceeded
 	}
 	return folder, nil
+}
+
+func TestSQLiteHierarchyCreationReleasesRejectedReservations(t *testing.T) {
+	ctx := t.Context()
+	f := newHierarchyFixture(t)
+	box := &creationTestMailbox{placementTestMailbox: placementTestMailbox{stateMailbox: f.box}, before: func() {}}
+	f.session = &testSession{box}
+	reopen := sqliteReplicaFixture(t, f)
+	db := reopen()
+	const attempts = maxPendingHierarchyCreations + 2
+	start, code := f.store.reserveLocalIDs(ctx, attempts)
+	if code != 0 {
+		t.Fatalf("reserve FIDs: %#x", code)
+	}
+	first := folderGlobalCount(fidFromGlobalCounter(start[:]))
+	collector := hierarchyState{store: f.store, root: f.binding.fids[IPMSubtree]}
+	rejections := []error{core.ErrInvalid, core.ErrConflict, core.ErrAccessDenied, core.ErrNotFound,
+		core.ErrAuthentication, core.ErrUnsupported, core.ErrLimit, errors.Join(core.ErrWriteNotDispatched, context.DeadlineExceeded)}
+	for i := range attempts {
+		request := hierarchyImport{source: hierarchyXID(f.store.replica, first+uint64(i)), name: "Rejected creation",
+			modified: core.Timestamp(hierarchyTestTime), change: gidChangeXID(hierarchyXID([16]byte{0xfc}, 1))}
+		box.reject = rejections[i%len(rejections)]
+		if err := collector.importMailFolderPlacement(ctx, f.session, request); !errors.Is(err, box.reject) {
+			t.Fatalf("rejection %d: %v", i, err)
+		}
+	}
+	if f.store.unboundCreations != 0 || box.creates != attempts {
+		t.Fatalf("definitive rejections consumed quota: pending %d, attempts %d", f.store.unboundCreations, box.creates)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopen()
+	collector = hierarchyState{store: f.store, root: f.binding.fids[IPMSubtree]}
+	request := hierarchyImport{source: hierarchyXID(f.store.replica, first), name: "Retry after restart",
+		modified: core.Timestamp(hierarchyTestTime), change: gidChangeXID(hierarchyXID([16]byte{0xfc}, 1))}
+	box.reject = nil
+	if err := collector.importMailFolderPlacement(ctx, f.session, request); err != nil || box.creates != attempts+1 {
+		t.Fatalf("definitive rejection could not be retried: %v", err)
+	}
 }
 
 func TestHierarchyFolderCreationThroughExecute(t *testing.T) {

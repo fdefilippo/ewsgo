@@ -31,6 +31,17 @@ type faiRecord struct {
 	object  core.Object
 	bytes   int
 }
+
+func activeFAICount(records map[core.ID]faiRecord) int {
+	count := 0
+	for _, record := range records {
+		if !record.deleted {
+			count++
+		}
+	}
+	return count
+}
+
 type faiObservation struct {
 	snapshot messageSnapshot
 	lease    *contentsLease // Detached result buffers; caller must close.
@@ -53,11 +64,11 @@ func (o *faiObservation) close() {
 func (s *ramStore) observeFAIMessages(ctx context.Context, session core.Session, anchor uint64) (*faiObservation, error) {
 	var lease *contentsLease
 	snapshot, err := s.observeMessageSet(ctx, session, anchor, true, func(_ context.Context, _ core.Mailbox, key folderKey) ([]core.Object, error) {
-		used, err := s.validateAbsentFAI(s.fai.records, s.fai.absent)
+		historyBytes, err := s.validateFAIHistory(s.fai.records, s.fai.absent)
 		if err != nil {
 			return nil, err
 		}
-		selected := 0
+		selected, activeBytes := 0, 0
 		seenSources := map[[22]byte]bool{}
 		var objects []core.Object
 		for id, record := range s.fai.records {
@@ -77,9 +88,8 @@ func (s *ramStore) observeFAIMessages(ctx context.Context, session core.Session,
 			if bytes != record.bytes {
 				return nil, core.ErrInvalid
 			}
-			used += bytes
-			if used > maxFAIStoreBytes {
-				return nil, core.ErrUnsupported
+			if !record.deleted {
+				activeBytes += bytes
 			}
 			if record.folder == anchor && !record.deleted {
 				if record.object.Parent != key.native {
@@ -89,6 +99,10 @@ func (s *ramStore) observeFAIMessages(ctx context.Context, session core.Session,
 				objects = append(objects, record.object) // Immutable under contentsMu.
 			}
 		}
+		if activeFAICount(s.fai.records) > maxFAIObjects || activeBytes > maxFAIStoreBytes {
+			return nil, core.ErrUnsupported
+		}
+		used := activeBytes + historyBytes
 		if used != s.fai.bytes || s.fai.lease.size() != used {
 			return nil, core.ErrInvalid
 		}

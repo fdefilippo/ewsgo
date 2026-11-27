@@ -6,6 +6,7 @@ package mapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -16,6 +17,55 @@ import (
 	"ewsgo/internal/mapireplica"
 	"ewsgo/internal/storage/sqlite"
 )
+
+func TestSQLiteMessageBindingsBeyondLegacyCumulativeLimit(t *testing.T) {
+	f, _ := messageFixture(t)
+	ctx := t.Context()
+	reopen := sqliteReplicaFixture(t, f)
+	db := reopen()
+	inbox := f.binding.fids[Inbox]
+	native := f.store.inbox
+	var earliest, latest uint64
+	for batch := range 5 {
+		objects := make([]core.Object, 1000)
+		for i := range objects {
+			objects[i] = core.Object{
+				ID: core.ID(fmt.Sprintf("message-%d", batch*len(objects)+i)), Parent: native,
+				Kind: core.Message, Revision: 1, Properties: core.Properties{
+					core.IsRead: core.Bool(false), core.LastModifiedAt: core.Timestamp(hierarchyTestTime),
+					core.MetadataRevision: core.Integer(1), core.ContentRevision: core.Integer(1),
+					core.VersionedMIME: core.Bool(true),
+				},
+			}
+		}
+		nodes, err := messageNodes(objects, native, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.commitMessages(ctx, inbox, false, 0, false, nodes, nil); err != nil {
+			t.Fatalf("batch %d: %v", batch, err)
+		}
+		if batch == 0 {
+			earliest = f.store.byMessage[messageKey{id: objects[0].ID}]
+		}
+		latest = f.store.byMessage[messageKey{id: objects[len(objects)-1].ID}]
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopen()
+	oldKey, newKey := messageKey{id: "message-0"}, messageKey{id: "message-4999"}
+	if len(f.store.byMessage) != 5000 || earliest == 0 || latest == 0 ||
+		f.store.byMessage[oldKey] != earliest || f.store.byMID[earliest] != oldKey || f.store.messages[oldKey].present ||
+		f.store.byMessage[newKey] != latest || f.store.byMID[latest] != newKey || !f.store.messages[newKey].present {
+		t.Fatal("restart changed active or retired bindings")
+	}
+	position := f.store.next
+	ids, err := f.store.assign(ctx, []folderKey{{native: "fresh-folder"}})
+	if err != nil || folderGlobalCount(ids[0]) <= position {
+		t.Fatalf("next allocation reused a previously issued ID: %v, %v", ids, err)
+	}
+}
 
 func TestSQLiteHierarchyReopenAndRetry(t *testing.T) {
 	f := newHierarchyFixture(t)

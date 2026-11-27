@@ -379,3 +379,66 @@ func TestSQLiteImportContactMoveToTrashThroughExecute(t *testing.T) {
 	}
 	t.Fatal("source Contacts ICS snapshot lost the tombstone")
 }
+
+func TestImportMessageMoveDistinguishesNativeMoveFromNewRevision(t *testing.T) {
+	for _, moved := range []bool{false, true} {
+		name := "NewRevision"
+		if moved {
+			name = "MovedByAnotherClient"
+		}
+		t.Run(name, func(t *testing.T) {
+			f, base := newContentsDownloadFixture(t)
+			box := &syncMoveMailbox{readStateMailbox: &readStateMailbox{messageFixtureMailbox: base}}
+			box.objects[0].Properties[core.IsDraft] = core.Bool(false)
+			f.session = &testSession{box}
+			f.transport.EnableFAICollectorSpike()
+			sqliteExecuteFixture(t, f)()
+			store := replicaStore(t, f)
+			inbox, sent, trash := f.fids[Inbox], f.fids[SentItems], f.fids[DeletedItems]
+			snapshot, err := store.observeMailMessages(t.Context(), f.session, inbox)
+			if err != nil || len(snapshot.messages) != 1 {
+				t.Fatal("source fixture unavailable", err)
+			}
+			row := snapshot.messages[0]
+			gc, code := store.reserveLocalIDs(t.Context(), 1)
+			if code != 0 {
+				t.Fatal("could not reserve destination ID")
+			}
+			var target [22]byte
+			copy(target[:16], store.replica[:])
+			copy(target[16:], gc[:])
+			wire := importMoveWire(store.hierarchyXID(inbox), row.sourceKey, target, row.predecessors,
+				gidChangeXID(hierarchyXID([16]byte{0x2b}, 5)))
+
+			obj := &box.objects[0]
+			obj.Revision++
+			obj.Properties[core.MetadataRevision] = core.Integer(obj.Revision)
+			obj.Properties[core.ContentRevision] = core.Integer(obj.Revision)
+			want := faiError(core.ErrConflict, false)
+			if moved {
+				obj.Parent = store.byFID[trash].native
+				want = syncObjectDeleted
+			}
+
+			faiRunOK(t, f, folderOperation(sent, 4, 0, 1))
+			faiRunOK(t, f, []byte{0x7e, 4, 1, 2, 1})
+			reply, _ := f.run(wire)
+			if !bytes.Equal(reply, ropError(0x78, 2, want)) || box.calls != 0 || len(store.messageMoves) != 0 {
+				t.Fatalf("unexpected result %x, native calls %d", reply, box.calls)
+			}
+			source, err := store.observeMailMessages(t.Context(), f.session, inbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if moved {
+				target, err := store.observeMailMessages(t.Context(), f.session, trash)
+				if err != nil || len(source.messages) != 0 || len(target.messages) != 1 ||
+					target.messages[0].object.ID != row.object.ID {
+					t.Fatalf("external move not observed in both folder views: %v", err)
+				}
+			} else if len(source.messages) != 1 || source.messages[0].cn == row.cn {
+				t.Fatal("source did not publish the new revision")
+			}
+		})
+	}
+}

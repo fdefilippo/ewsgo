@@ -6,6 +6,8 @@ package zimbra
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -49,5 +51,33 @@ func TestSOAPAndRESTActivitiesNeverContainValues(t *testing.T) {
 		if strings.Contains(string(raw), private) {
 			t.Fatal("private value in backend activity")
 		}
+	}
+}
+
+func TestEndSessionFaultRecordsOnlyTechnicalOutcome(t *testing.T) {
+	fixture := fakeZimbra(t)
+	client := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if strings.Contains(string(raw), "EndSessionRequest") {
+			fault(w, "service.FAILURE")
+			return
+		}
+		r.Body = io.NopCloser(strings.NewReader(string(raw)))
+		fixture(w, r)
+	}), Config{})
+	session := login(t, client)
+	probe := &activityProbe{}
+	ctx := core.WithActivityObserver(t.Context(), probe)
+	if err := session.Logout(ctx); err == nil {
+		t.Fatal("SOAP fault did not reach the caller")
+	}
+	events, _ := json.Marshal(probe.events)
+	if len(probe.events) != 1 || probe.events[0].Operation != "EndSession" || probe.events[0].Result != core.ActivityFailure ||
+		strings.Contains(string(events), "PRIVATE") || strings.Contains(string(events), fixtureToken) {
+		t.Fatalf("incorrect logout diagnostic: %s", events)
 	}
 }

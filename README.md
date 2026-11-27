@@ -22,8 +22,9 @@ synchronization with MailCraft CLI and mail access in classic Outlook LTSC
 2021 in online and cached modes. Testing also covered personal contacts and
 appointments in Outlook, and recurring events and meeting invitations over
 EWS. Outlook writes to recurring events and Outlook invitation actions still
-need qualification. A known issue affects synchronization of large Zimbra
-Trash folders containing both mail and groupware items.
+need qualification. A later Outlook cached-mode test verified synchronization
+of 340 messages from a Zimbra Trash folder containing mail, contacts and
+appointments.
 
 The Zimbra backend includes `ewsgo-rules` for Outlook rules, receive folders
 and deferred actions. Its source and installation guide are in

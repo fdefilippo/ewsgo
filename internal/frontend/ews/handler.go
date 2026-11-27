@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,7 +107,11 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, session core.Ses
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<20))
 	if err != nil {
-		http.Error(w, "request limit", 413)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			http.Error(w, "request timed out", http.StatusRequestTimeout)
+		} else {
+			http.Error(w, "request limit", http.StatusRequestEntityTooLarge)
+		}
 		return
 	}
 	root, err := parse(raw)

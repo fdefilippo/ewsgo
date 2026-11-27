@@ -114,6 +114,14 @@ func TestNamedRegistryLookupCreationSpecialSetsQuotaAndConcurrency(t *testing.T)
 	if code != 0 || !reflect.DeepEqual(ids, []uint16{0x8001, 0x8002, 0x8002, 0x8001, 0, 0}) {
 		t.Fatal("registration/duplicates/header normalization")
 	}
+	ids, code = registry.ids(context.Background(), []propertyName{
+		{Set: psMAPI, LID: 0x7fff}, {Set: psMAPI, LID: 0x8000}, {Set: psMAPI, LID: 0x8001},
+		{Set: psMAPI, LID: 0xfffe}, {Set: psMAPI, LID: 0xffff}, name,
+	}, true)
+	if code != 0 || !reflect.DeepEqual(ids, []uint16{0x7fff, 0, 0, 0, 0, 0x8001}) {
+		t.Fatalf("PS_MAPI boundary returned %x, %x", ids, code)
+	}
+
 	// Different property sets, kinds and ordinary-name case remain distinct.
 	a := propertyName{Set: [16]byte{2}, Kind: 1, Name: "Case"}
 	b := a

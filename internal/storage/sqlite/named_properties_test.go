@@ -25,13 +25,17 @@ func TestNamedPropertyIDsSurviveReopenAndIsolateScopes(t *testing.T) {
 	lower := core.Key{Set: internetHeadersSet, Name: "x-ewsgo-test"}
 	zero := core.Key{Set: testPropertySet}
 	empty := core.Key{Set: testPropertySet, EmptyName: true}
-	standard := core.Key{Set: standardMAPISet, ID: 0x3001}
-	names := []core.Key{upper, lower, zero, empty, standard}
+	standard := core.Key{Set: standardMAPISet, ID: 0x7fff}
+	names := []core.Key{upper, lower, zero, empty, standard,
+		{Set: standardMAPISet, ID: 0x8000}, {Set: standardMAPISet, ID: 0x8001},
+		{Set: standardMAPISet, ID: 0xfffe}, {Set: standardMAPISet, ID: 0xffff},
+		{Set: testPropertySet, ID: 0x8001},
+	}
 	ids, err := store.NamedPropertyIDs(ctx, mailbox, names, false)
-	if err != nil || !slices.Equal(ids, []uint16{0, 0, 0, 0, 0x3001}) {
+	if err != nil || !slices.Equal(ids, []uint16{0, 0, 0, 0, 0x7fff, 0, 0, 0, 0, 0}) {
 		t.Fatalf("lookup before allocation: %x, %v", ids, err)
 	}
-	assigned := []uint16{0x8001, 0x8001, 0x8002, 0x8003, 0x3001}
+	assigned := []uint16{0x8001, 0x8001, 0x8002, 0x8003, 0x7fff, 0, 0, 0, 0, 0x8004}
 	ids, err = store.NamedPropertyIDs(ctx, mailbox, names, true)
 	if err != nil || !slices.Equal(ids, assigned) {
 		t.Fatalf("allocation: %x, %v", ids, err)
@@ -45,12 +49,12 @@ func TestNamedPropertyIDsSurviveReopenAndIsolateScopes(t *testing.T) {
 		t.Fatalf("lookup after reopening: %x, %v", ids, err)
 	}
 	reverse, err := store.NamedPropertyKeys(ctx, mailbox, append(ids, 0, 0xfffe))
-	want := map[uint16]core.Key{0x8001: lower, 0x8002: zero, 0x8003: empty, 0x3001: standard}
+	want := map[uint16]core.Key{0x8001: lower, 0x8002: zero, 0x8003: empty, 0x7fff: standard, 0x8004: names[9]}
 	if err != nil || !reflect.DeepEqual(reverse, want) {
 		t.Fatalf("inverse: %+v, %v", reverse, err)
 	}
 	ids, err = store.NamedPropertyIDs(ctx, mailbox, nil, true)
-	if err != nil || !slices.Equal(ids, []uint16{0x8001, 0x8002, 0x8003}) {
+	if err != nil || !slices.Equal(ids, []uint16{0x8001, 0x8002, 0x8003, 0x8004}) {
 		t.Fatalf("enumeration: %x, %v", ids, err)
 	}
 	for _, scope := range []struct{ account, instance string }{

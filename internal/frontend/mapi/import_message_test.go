@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"maps"
 	"net/mail"
 	"slices"
 	"testing"
@@ -20,10 +21,33 @@ type syncAppendMailbox struct {
 	*syncMoveMailbox
 	appends           int
 	loseReply, loseID bool
+	appendErr         error
+	fullReadErr       error
+}
+
+func (b *syncAppendMailbox) ReadMailContents(ctx context.Context, folder core.ID) (core.MailContents, error) {
+	if b.fullReadErr != nil {
+		return core.MailContents{}, b.fullReadErr
+	}
+	return b.syncMoveMailbox.ReadMailContents(ctx, folder)
+}
+
+func (b *syncAppendMailbox) ReadMailContentIndex(ctx context.Context, folder core.ID) (core.MailContents, error) {
+	index, err := b.syncMoveMailbox.ReadMailContents(ctx, folder)
+	for i := range index.Messages {
+		o := &index.Messages[i]
+		o.Properties = maps.Clone(o.Properties)
+		o.Properties[core.VersionedMIME] = core.Bool(true)
+		o.MIME = nil
+	}
+	return index, err
 }
 
 func (b *syncAppendMailbox) AppendMailMessage(_ context.Context, folder core.ID, raw []byte, options core.MailAppendOptions) (core.Object, error) {
 	b.appends++
+	if b.appendErr != nil {
+		return core.Object{}, b.appendErr
+	}
 	obj := messageTestObject("native-import-fixture", folder)
 	obj.MIME = bytes.Clone(raw)
 	obj.Properties[core.IsDraft], obj.Properties[core.IsRead] = core.Bool(false), core.Bool(options.Read)
@@ -102,16 +126,22 @@ func TestImportedMailMIMEPreservesAlternativeAndFileAcrossRetries(t *testing.T) 
 }
 
 func TestSQLiteNormalMessageImportResumesWithoutSecondAppend(t *testing.T) {
-	for _, loseID := range []bool{false, true} {
-		name := "KnownID"
-		if loseID {
-			name = "MissingID"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		loseID, multiple bool
+		appendErr        error
+	}{
+		{name: "KnownID"},
+		{name: "MissingID", loseID: true},
+		{name: "MultipleMIMEMatches", loseID: true, multiple: true},
+		{name: "AppendNotDispatched", appendErr: errors.Join(core.ErrWriteNotDispatched, context.Canceled)},
+		{name: "AppendWithNoEffectButUnknown", appendErr: core.ErrOutcomeUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			f, base := newContentsDownloadFixture(t)
 			backend := &syncAppendMailbox{
 				syncMoveMailbox: &syncMoveMailbox{readStateMailbox: &readStateMailbox{messageFixtureMailbox: base}},
-				loseReply:       true, loseID: loseID,
+				loseReply:       tc.appendErr == nil, loseID: tc.loseID, appendErr: tc.appendErr,
 			}
 			f.session = &testSession{backend}
 			f.transport.EnableFAICollectorSpike()
@@ -159,29 +189,55 @@ func TestSQLiteNormalMessageImportResumesWithoutSecondAppend(t *testing.T) {
 			if backend.appends != 0 {
 				t.Fatal("upload committed before Save")
 			}
-			requireFailure(save, 4, faiError(core.ErrOutcomeUnknown, true))
+			firstErr := tc.appendErr
+			if firstErr == nil {
+				firstErr = core.ErrOutcomeUnknown
+			}
+			requireFailure(save, 4, faiError(firstErr, true))
 			if backend.appends != 1 || store.byMID[mid] != (messageKey{}) {
 				t.Fatal("first attempt published an unconfirmed projection")
 			}
-			if _, err := store.observeMailMessages(t.Context(), f.session, inbox); !errors.Is(err, core.ErrOutcomeUnknown) {
-				t.Fatal("pending native message was presented under another MID")
+			if tc.multiple {
+				candidate := backend.objects[len(backend.objects)-1]
+				candidate.ID = "other-identical-native-message"
+				backend.objects = append(backend.objects, candidate)
 			}
+			checkUnaffected := func() {
+				t.Helper()
+				snapshot, err := store.observeMailMessages(t.Context(), f.session, inbox)
+				if err != nil || len(snapshot.messages) != 1 || snapshot.messages[0].object.ID != "opaque-message" {
+					t.Fatalf("unrelated mail was blocked or an unconfirmed candidate was published: rows=%d err=%v", len(snapshot.messages), err)
+				}
+			}
+			checkUnaffected()
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
 			reopen()
 			store = replicaStore(t, f)
+			backend.fullReadErr = core.ErrLimit
+			indexed, err := store.observeMailMessageSet(t.Context(), f.session, inbox, true)
+			backend.fullReadErr = nil
+			if err != nil || len(indexed.messages) != 1 || indexed.messages[0].object.ID != "opaque-message" {
+				t.Fatalf("indexed view blocked or exposed an unconfirmed candidate: rows=%d err=%v", len(indexed.messages), err)
+			}
+			checkUnaffected()
 			open()
 			upload(payload)
-			if loseID {
+			if tc.loseID || errors.Is(tc.appendErr, core.ErrOutcomeUnknown) {
 				requireFailure(save, 4, faiError(core.ErrOutcomeUnknown, true))
 				if backend.appends != 1 {
 					t.Fatal("unknown native outcome retried append")
 				}
 				return
 			}
+			writes := 1
+			if errors.Is(tc.appendErr, core.ErrWriteNotDispatched) {
+				backend.appendErr = nil
+				writes++
+			}
 			saved := faiRunOK(t, f, save)
-			if len(saved) != 15 || binary.LittleEndian.Uint64(saved[7:]) != mid || backend.appends != 1 {
+			if len(saved) != 15 || binary.LittleEndian.Uint64(saved[7:]) != mid || backend.appends != writes {
 				t.Fatal("retry did not publish the reserved MID without reappending")
 			}
 			requireFailure(faiImportOperation(r), 3, faiError(errFAIIgnore, false))

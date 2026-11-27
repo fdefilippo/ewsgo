@@ -35,7 +35,7 @@ func (t *SessionTransport) replaceFolderUserGrants(ctx context.Context, session 
 	now := time.Now()
 	var directory map[core.Scope]core.DirectoryEntry
 	for _, change := range request.rows {
-		scope := store.permissionMemberScope(change.memberID)
+		var scope core.Scope
 		if change.operation == permissionAdd {
 			if directory == nil {
 				var code uint32
@@ -49,6 +49,12 @@ func (t *SessionTransport) replaceFolderUserGrants(ctx context.Context, session 
 			scope, code = t.permissionDirectoryScope(directory, session.Identity().Scope, dn)
 			if code != 0 {
 				return code
+			}
+		} else {
+			var err error
+			scope, err = store.permissionMemberScope(ctx, change.memberID)
+			if err != nil {
+				return storeError(err)
 			}
 		}
 		previous, present := next[scope.Account]

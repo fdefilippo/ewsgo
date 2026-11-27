@@ -159,7 +159,7 @@ func (s *ramStore) createFolder(ctx context.Context, session core.Session, paren
 		depth = s.dynamic[key.dynamic].depth + 1
 	}
 	budget := 128 + len(request.name) + len(request.comment) + len(key.native)
-	if len(s.dynamic) >= maxDynamicFolders || depth > maxDynamicDepth || s.dynamicBytes+budget > maxDynamicBytes || s.mappingCountLocked() >= maxRAMMappings || s.next >= maxGlobalCount {
+	if len(s.dynamic) >= maxDynamicFolders || depth > maxDynamicDepth || s.dynamicBytes+budget > maxDynamicBytes || s.mappingCountLocked() >= s.mappingLimit() || s.next >= maxGlobalCount {
 		return 0, 0x8007000e
 	}
 	// One counter allocates both the private key discriminator and the FID;

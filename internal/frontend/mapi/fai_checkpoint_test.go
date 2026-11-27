@@ -204,11 +204,65 @@ func TestFAIStatePermitChainsPublicationQuotaAndNoEviction(t *testing.T) {
 		go func() { defer wg.Done(); f.store.finishFAIStatePermit(p, false) }()
 	}
 	wg.Wait()
-	if len(f.store.faiStatePermits) != 1 {
-		t.Fatal("quota abort removed published permit")
+	if len(f.store.faiStatePermits) != 0 || len(f.store.faiUploadProofs) != 1 {
+		t.Fatal("quota abort retained reservations or removed a published proof")
 	}
 	f.store.finishFAIStatePermit(b, false)
 	if err := f.store.validateContentsCheckpointRoot(t.Context(), scope, second, c.state.root); err != nil {
 		t.Fatal("published permit revoked by repeated cleanup")
+	}
+}
+
+func TestFAIUploadPermitsAreReusableAcrossCollectorSessions(t *testing.T) {
+	f, _ := messageFixture(t)
+	root, otherRoot := f.binding.fids[Inbox], f.binding.fids[SentItems]
+	scope := [32]byte{1}
+	var expired, last contentsSyncState
+	for i := range maxFAIStatePermits + 1 {
+		c := collectorForTest(t, f, contentsSyncState{})
+		if err := c.prepareMutation(t.Context(), f.session, 1); err != nil {
+			t.Fatalf("session %d: %v", i, err)
+		}
+		c.acknowledge([]uint64{uint64(i + 1)})
+		state, permit := collectorFinalForTest(t, f, c, idSet{})
+		f.store.finishFAIStatePermit(permit, true)
+		c.close()
+		if len(f.store.faiStatePermits) != 0 || permit.lease.size() >= faiStatePermitMemory {
+			t.Fatal("published upload retained an active reservation")
+		}
+		if i == 0 {
+			expired = state
+		}
+		last = state
+	}
+	for range 2 {
+		if err := f.store.validateContentsCheckpointRoot(t.Context(), scope, last, root); err != nil {
+			t.Fatal("recent upload cannot be replayed", err)
+		}
+	}
+	if err := f.store.validateContentsCheckpointRoot(t.Context(), scope, expired, root); !errors.Is(err, core.ErrResync) {
+		t.Fatal("oldest upload proof remained past the retention limit", err)
+	}
+	if err := f.store.validateContentsCheckpointRoot(t.Context(), scope, last, otherRoot); !errors.Is(err, core.ErrResync) {
+		t.Fatal("upload proof crossed folders", err)
+	}
+	a, b := collectorForTest(t, f, contentsSyncState{}), collectorForTest(t, f, contentsSyncState{})
+	for _, c := range []*faiCollector{a, b} {
+		if err := c.prepareMutation(t.Context(), f.session, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var canceled sync.WaitGroup
+	canceled.Go(a.close)
+	b.acknowledge([]uint64{100})
+	state, permit := collectorFinalForTest(t, f, b, idSet{})
+	f.store.finishFAIStatePermit(permit, true)
+	b.close()
+	canceled.Wait()
+	if err := f.store.validateContentsCheckpointRoot(t.Context(), scope, state, root); err != nil {
+		t.Fatal("closing one collector invalidated another collector's proof", err)
+	}
+	if len(f.store.faiStatePermits) != 0 || len(f.store.faiUploadProofs) != maxFAIStatePermits {
+		t.Fatal("collector closure leaked beyond the two quotas")
 	}
 }

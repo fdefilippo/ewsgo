@@ -97,7 +97,7 @@ func (s *ramStore) stageLocalMessage(ctx context.Context, session core.Session, 
 	if privateConfig && s.freeBusyMessage().mid != 0 {
 		return nil, core.ErrConflict
 	}
-	if !privateConfig && len(s.fai.records)+len(s.fai.absent) >= maxFAIObjects {
+	if !privateConfig && activeFAICount(s.fai.records) >= maxFAIObjects {
 		return nil, core.ErrUnsupported
 	}
 	lease, err := s.reserveContentsMemory(maxFAIObjectBytes)

@@ -5,6 +5,8 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"regexp"
 )
@@ -12,6 +14,11 @@ import (
 var sendIntentID = regexp.MustCompile(`^[a-z2-7]{26}$`)
 
 func ValidSendIntentID(id string) bool { return sendIntentID.MatchString(id) }
+
+// DraftSendKey identifies a saved native draft revision within one mailbox.
+func DraftSendKey(draft ID, revision Revision) [32]byte {
+	return sha256.Sum256(append(binary.LittleEndian.AppendUint64([]byte("ewsgo:draft-send:v1\x00"), uint64(revision)), draft...))
+}
 
 // SendState describes what the gateway knows about a submission. A confirmed
 // state records backend acceptance. Delivery to a recipient is outside it.
@@ -54,12 +61,17 @@ type SendIntent struct {
 	SentID ID // optional native receipt, available only after confirmation
 }
 
-// ErrSendRejected denotes a backend response proving that it did not accept
-// the submission. Other submission errors leave the outcome uncertain.
+// ErrSendRejected denotes a definitive, terminal rejection of this submission.
 var ErrSendRejected = errors.New("send rejected before acceptance")
+
+// ErrSendRetryable proves that submission did not reach acceptance and can
+// safely be attempted again with the same intent.
+var ErrSendRetryable = errors.New("send can be retried")
 
 var ErrInvalidSendRecipients = errors.New("invalid submission recipients")
 
+// SendAttempt reports the native acknowledgment. Apart from ErrSendRejected
+// and ErrSendRetryable, an error leaves the outcome uncertain.
 type SendAttempt func(context.Context) (ID, error)
 
 // MailSendBackend stages a submission without sending it. An upload may be

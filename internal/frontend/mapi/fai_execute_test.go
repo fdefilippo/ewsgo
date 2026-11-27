@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -158,11 +159,11 @@ func TestFAIExecuteCompleteCreateReadUpdateDeleteAndReconnect(t *testing.T) {
 		t.Fatal("collector state retained the maximum encoding reservation")
 	}
 	permit := object.download.contents.permit
-	if permit == nil || permit.ready {
+	if permit == nil || slices.Contains(store.faiUploadProofs, permit) {
 		t.Fatal("state grant prematurely published")
 	}
 	state := collectorThreeTestSets(t, drainFX(t, f.run, 4, 31), idSet{})
-	if !permit.ready {
+	if !slices.Contains(store.faiUploadProofs, permit) {
 		t.Fatal("complete state source did not publish")
 	}
 	faiRunOK(t, f, []byte{1, 4, 4, 1, 4, 2, 0x7e, 4, 1, 2, 1})
@@ -190,7 +191,8 @@ func TestFAIExecuteCompleteCreateReadUpdateDeleteAndReconnect(t *testing.T) {
 		t.Fatal("collector read native messages")
 	}
 	f.state.mailbox.close()
-	if f.transport.stores.transfers.Load() != 0 || f.transport.stores.contents.used != store.fai.bytes+faiStatePermitMemory+contentsProofMemory {
+	if f.transport.stores.transfers.Load() != 0 || len(store.faiStatePermits) != 0 || len(store.faiUploadProofs) != 1 ||
+		f.transport.stores.contents.used != store.fai.bytes+permit.lease.size()+contentsProofMemory {
 		t.Fatal("FAI context cleanup leaked")
 	}
 }
@@ -329,7 +331,7 @@ func TestFAIExecuteCommitBatchPreflightAndStateSourceAbort(t *testing.T) {
 		t.Fatal("missing pending permit")
 	}
 	// A tiny buffer cannot publish; releasing the source cancels its grant.
-	if data, status := getFXBuffer(t, f.run, 4, 1); len(data) != 0 || status != 2 || permit.ready {
+	if data, status := getFXBuffer(t, f.run, 4, 1); len(data) != 0 || status != 2 || slices.Contains(store.faiUploadProofs, permit) {
 		t.Fatal("short buffer published")
 	}
 	faiRunOK(t, f, []byte{1, 4, 4})
@@ -458,4 +460,57 @@ func TestFAIExecuteCalendarLocalConfigurationWithFilterAndNoEventPort(t *testing
 		t.Fatal("Calendar native event Contents enabled")
 	}
 	f.state.mailbox.close()
+}
+
+func TestFAIExecuteLosingUploadDownloadsWinnerAfterRestart(t *testing.T) {
+	f, _, _ := newFAIExecuteFixture(t)
+	reopen := sqliteExecuteFixture(t, f)
+	reopen()
+	f.handles = append(f.handles, 0xffffffff)
+	faiRunOK(t, f, []byte{0x7e, 4, 1, 2, 1})
+	winner := syntheticFAIImport()
+	faiRunOK(t, f, faiImportOperation(winner))
+	faiRunOK(t, f, faiSetOperation(3, faiCreateProperties()))
+	faiRunOK(t, f, []byte{0x0c, 4, 4, 3, 0})
+	faiRunOK(t, f, []byte{1, 4, 3, 1, 4, 2})
+
+	config := fullContentsConfig()
+	configureContentsTest(t, f, config)
+	baseline := contentsFourTestSets(t, drainFX(t, f.run, 2, 97))
+	faiRunOK(t, f, []byte{1, 4, 2, 0x7e, 4, 1, 2, 1})
+	uploadContentsWireTest(t, f, baseline)
+	loser := winner
+	loser.change = gidChangeXID(faiTestXID(2, 1))
+	loser.predecessors = faiPCL{[16]byte{2}: testXIDLocal([6]byte{0, 0, 0, 0, 0, 1})}
+	loser.modified = winner.modified.Add(-time.Minute)
+	faiRunOK(t, f, faiImportOperation(loser))
+	values := faiCreateProperties()
+	values[2].value = core.Text("Losing view")
+	faiRunOK(t, f, faiSetOperation(3, values))
+	faiRunOK(t, f, []byte{0x0c, 4, 4, 3, 2})
+	faiRunOK(t, f, []byte{0x0c, 4, 4, 3, 2}) // Retrying the save must not acknowledge the winner either.
+	faiRunOK(t, f, []byte{0x82, 4, 2, 4})
+	checkpoint := collectorThreeTestSets(t, drainFX(t, f.run, 4, 43), baseline.given)
+	if !reflect.DeepEqual(checkpoint.seenFAI, baseline.seenFAI) {
+		t.Fatal("losing upload acknowledged a version the client has not received")
+	}
+
+	reopen()
+	f.handles = append(f.handles, 0xffffffff)
+	configureContentsTest(t, f, config)
+	uploadContentsWireTest(t, f, checkpoint)
+	raw := drainFX(t, f.run, 2, 97)
+	views := 0
+	for _, token := range decodeTestContents(t, raw) {
+		if token.tag == 0x7006001f {
+			if token.value != "Synthetic view" {
+				t.Fatal("client received the losing view")
+			}
+			views++
+		}
+	}
+	final := contentsFourTestSets(t, raw)
+	if views != 1 || reflect.DeepEqual(final.seenFAI, checkpoint.seenFAI) {
+		t.Fatal("winning conflict resolution was not available as a new change")
+	}
 }

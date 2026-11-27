@@ -10,6 +10,53 @@ import (
 	"ewsgo/internal/core"
 )
 
+const (
+	journalRetainedRevisions = 100_000
+	journalCompactionBatch   = 10_000
+	journalCompactionBoxes   = 32
+)
+
+// MaintainJournal bounds the work of each pass and advances retention
+// independently for each mailbox. Mailboxes with the most backlog go first.
+func (s *Store) MaintainJournal(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT mailbox_id, journal_generation,
+			MIN(journal_revision - ?, journal_floor + ?)
+		FROM mailboxes
+		WHERE journal_revision - journal_floor > ?
+		ORDER BY journal_revision - journal_floor DESC, mailbox_id
+		LIMIT ?
+	`, journalRetainedRevisions, journalCompactionBatch, journalRetainedRevisions, journalCompactionBoxes)
+	if err != nil {
+		return fmt.Errorf("find journals due for compaction: %w", err)
+	}
+	type candidate struct {
+		id     string
+		cutoff JournalCursor
+	}
+	var due []candidate
+	defer rows.Close()
+	for rows.Next() {
+		var entry candidate
+		if err := rows.Scan(&entry.id, &entry.cutoff.Generation, &entry.cutoff.Revision); err != nil {
+			return fmt.Errorf("read journal compaction candidate: %w", err)
+		}
+		due = append(due, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read journals due for compaction: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, entry := range due {
+		if err := s.CompactJournal(ctx, entry.id, entry.cutoff); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // CompactJournal discards history through the given revision. It retains the
 // latest row for each live object so property reads and edits still see its
 // parent and revision. Clients below the cutoff must fully synchronize again.

@@ -94,7 +94,8 @@ func TestPullNotificationsJournalWatermarksAndRecovery(t *testing.T) {
 	fresh = append(fresh,
 		sqlite.DeltaEvent{ObjectKind: core.Message, Change: core.Change{Kind: core.Created, ID: "hidden", Parent: "folder-b"}},
 		sqlite.DeltaEvent{ObjectKind: core.Message, Change: core.Change{Kind: core.Moved, ID: "new-0", Parent: "folder-b", PreviousParent: "folder-a"}},
-		sqlite.DeltaEvent{ObjectKind: core.Message, Change: core.Change{Kind: core.Deleted, ID: "new-1", Parent: "folder-a"}},
+		sqlite.DeltaEvent{ObjectKind: core.Message, Change: core.Change{Kind: core.Deleted, ID: "new-1", PreviousParent: "folder-a"}},
+		sqlite.DeltaEvent{ObjectKind: core.Message, Change: core.Change{Kind: core.Deleted, ID: "hidden", PreviousParent: "folder-b"}},
 	)
 	apply("observed", fresh...)
 	events := poll(session, token, "NoError").find(messages, "Notification")
@@ -108,8 +109,16 @@ func TestPullNotificationsJournalWatermarksAndRecovery(t *testing.T) {
 	last := nodeText(events.Children[len(events.Children)-1].child(types, "Watermark"))
 	events = poll(session, last, "NoError").find(messages, "Notification")
 	move := events.child(types, "MovedEvent")
-	if len(events.Children) != 6 || move == nil || events.child(types, "DeletedEvent") == nil || nodeText(events.child(types, "MoreEvents")) != "false" {
+	deleted := events.child(types, "DeletedEvent")
+	if len(events.Children) != 6 || move == nil || deleted == nil || nodeText(events.child(types, "MoreEvents")) != "false" {
 		t.Fatal("move out, deletion or folder filtering failed")
+	}
+	if deleted.child(types, "ItemId").attr("Id") != h.itemID(scope, core.Object{ID: "new-1", Parent: "folder-a"}) ||
+		deleted.child(types, "ParentFolderId").attr("Id") != h.encode(scope, "folder-a") {
+		t.Fatal("deletion did not preserve its original placement")
+	}
+	if !sameNotificationWire(events, poll(session, last, "NoError").find(messages, "Notification")) {
+		t.Fatal("replayed watermark changed the deletion event")
 	}
 	if move.child(types, "ItemId").attr("Id") == move.child(types, "OldItemId").attr("Id") ||
 		move.child(types, "OldParentFolderId").attr("Id") != h.encode(scope, "folder-a") {

@@ -64,6 +64,7 @@ func (s *ramStore) attachFAISync(nodes []messageNode) {
 }
 
 type faiDraft struct {
+	acknowledgedCN                 uint64 // Last committed version supplied by this handle.
 	mu                             sync.Mutex
 	store                          *ramStore
 	root                           uint64
@@ -202,7 +203,7 @@ func (s *ramStore) newFAIDraft(ctx context.Context, session core.Session, root u
 		}
 	}
 	if id == "" {
-		if len(s.fai.records)+len(s.fai.absent) >= maxFAIObjects {
+		if activeFAICount(s.fai.records) >= maxFAIObjects {
 			return nil, core.ErrUnsupported
 		}
 		id = faiIDForSource(request.source)
@@ -353,76 +354,77 @@ func (d *faiDraft) setLocked(ctx context.Context, session core.Session, values f
 	return problems, nil
 }
 func (d *faiDraft) save(ctx context.Context, session core.Session, flags byte) (messageRow, error) {
-	row, _, err := d.saveWithCreation(ctx, session, flags)
+	row, _, _, err := d.saveWithCreation(ctx, session, flags)
 	return row, err
 }
-func (d *faiDraft) saveWithCreation(ctx context.Context, session core.Session, flags byte) (messageRow, bool, error) {
+func (d *faiDraft) saveWithCreation(ctx context.Context, session core.Session, flags byte) (messageRow, bool, bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
-		return messageRow{}, false, core.ErrClosed
+		return messageRow{}, false, false, core.ErrClosed
 	}
 	var valid bool
 	flags, valid = faiSaveMode(flags)
 	if !valid {
-		return messageRow{}, false, core.ErrUnsupported
+		return messageRow{}, false, false, core.ErrUnsupported
 	}
 	if err := d.stageUpload(ctx, session); err != nil {
-		return messageRow{}, false, err
+		return messageRow{}, false, false, err
 	}
 	if d.privateConfig {
-		return d.saveFreeBusyMessage(ctx, session, flags)
+		row, created, err := d.saveFreeBusyMessage(ctx, session, flags)
+		return row, created, false, err
 	}
 	s := d.store
 	s.contentsMu.Lock()
 	defer s.contentsMu.Unlock()
 	key, err := s.messageAnchor(ctx, session, d.root, true)
 	if err != nil {
-		return messageRow{}, false, err
+		return messageRow{}, false, false, err
 	}
 	current, exists := s.fai.records[d.id]
 	if folder, deleted := s.fai.absent[d.request.source]; deleted {
 		if folder != d.root {
-			return messageRow{}, false, core.ErrAccessDenied
+			return messageRow{}, false, false, core.ErrAccessDenied
 		}
-		return messageRow{}, false, core.ErrConflict
+		return messageRow{}, false, false, core.ErrConflict
 	}
 	if current.deleted {
-		return messageRow{}, false, core.ErrConflict
+		return messageRow{}, false, false, core.ErrConflict
 	}
 	if d.saved && !d.dirty {
 		workspace, err := s.reserveContentsMemory(maxFAIObjectBytes)
 		if err != nil {
-			return messageRow{}, false, err
+			return messageRow{}, false, false, err
 		}
 		defer workspace.release()
 		row, err := s.readFAIRowLocked(ctx, d.root, d.id)
 		if err == nil {
 			d.finishSave(flags)
 		}
-		return row, false, err
+		return row, false, row.cn != d.acknowledgedCN, err
 	}
 	if d.readOnly {
-		return messageRow{}, false, core.ErrAccessDenied
+		return messageRow{}, false, false, core.ErrAccessDenied
 	}
 	if exists && current.object.Revision != d.base && flags != 4 {
-		return messageRow{}, false, core.ErrConflict
+		return messageRow{}, false, false, core.ErrConflict
 	}
 	if !exists && d.base != 0 {
-		return messageRow{}, false, core.ErrConflict
+		return messageRow{}, false, false, core.ErrConflict
 	}
-	if !exists && len(s.fai.records)+len(s.fai.absent) >= maxFAIObjects {
-		return messageRow{}, false, core.ErrUnsupported
+	if !exists && activeFAICount(s.fai.records) >= maxFAIObjects {
+		return messageRow{}, false, false, core.ErrUnsupported
 	}
 	// Reserve the candidate and detached copy before a save can publish changes.
 	workspace, err := s.reserveContentsMemory(2 * maxFAIObjectBytes)
 	if err != nil {
-		return messageRow{}, false, err
+		return messageRow{}, false, false, err
 	}
 	defer workspace.release()
 	props, err := core.CloneProperties(d.properties)
 	if err != nil {
-		return messageRow{}, false, err
+		return messageRow{}, false, false, err
 	}
 	incoming := &faiSyncVersion{source: d.request.source, change: d.request.change, predecessors: d.request.predecessors}
 	incoming = cloneFAISync(incoming)
@@ -432,25 +434,27 @@ func (d *faiDraft) saveWithCreation(ctx context.Context, session core.Session, f
 		incoming.serverNew = !d.saved
 	}
 	record := faiRecord{folder: d.root, sync: incoming, object: core.Object{ID: d.id, Parent: key.native, Kind: core.Message, Revision: current.object.Revision + 1, Properties: props}}
+	serverWins := false
 	if exists && current.sync != nil {
 		oldPCL, newPCL := current.sync.predecessors, incoming.predecessors
 		oldIncludes, newIncludes := oldPCL.includes(newPCL), newPCL.includes(oldPCL)
 		if !d.saved && flags != 4 && oldIncludes {
-			return messageRow{}, false, core.ErrConflict
+			return messageRow{}, false, false, core.ErrConflict
 		}
 		conflict := !oldIncludes && !newIncludes
 		if !d.saved && conflict && d.request.flags&0x40 != 0 && flags != 4 {
-			return messageRow{}, false, core.ErrConflict
+			return messageRow{}, false, false, core.ErrConflict
 		}
 		merged, err := mergeFAIPCL(oldPCL, newPCL)
 		if err != nil {
-			return messageRow{}, false, err
+			return messageRow{}, false, false, err
 		}
 		// FAI conflicts have no conflict-message attachments. Preserve the winner
 		// and merge both histories using MS-OXCFXICS Last Writer Wins.
 		if !d.saved && conflict && flags != 4 {
 			oldDate := time.Time(current.object.Properties[core.LastModifiedAt].(core.Timestamp))
 			if oldDate.After(d.request.modified) || oldDate.Equal(d.request.modified) && current.sync.change[:16] > incoming.change[:16] {
+				serverWins = true
 				record = current
 				record.object.Revision++
 				record.sync = cloneFAISync(current.sync)
@@ -461,7 +465,7 @@ func (d *faiDraft) saveWithCreation(ctx context.Context, session core.Session, f
 	if record.sync.local {
 		if _, exists := record.sync.predecessors[s.replica]; !exists {
 			if len(record.sync.predecessors) >= maxFAIPCLReplicas {
-				return messageRow{}, false, core.ErrUnsupported
+				return messageRow{}, false, false, core.ErrUnsupported
 			}
 			// Reserve the namespace slot before quota validation. Registry commit
 			// replaces this private placeholder with the allocated change counter.
@@ -469,14 +473,14 @@ func (d *faiDraft) saveWithCreation(ctx context.Context, session core.Session, f
 		}
 	}
 	if err = s.validateFAIXIDWidths(record.sync); err != nil {
-		return messageRow{}, false, err
+		return messageRow{}, false, false, err
 	}
 	if _, err = s.validateFAIRecord(record); err != nil {
-		return messageRow{}, false, err
+		return messageRow{}, false, false, err
 	}
 	row, err := s.commitFAIRecord(ctx, session, d.root, d.id, record)
 	if err != nil {
-		return messageRow{}, false, err
+		return messageRow{}, false, false, err
 	}
 	committed := s.fai.records[d.id]
 	d.base = committed.object.Revision
@@ -487,7 +491,11 @@ func (d *faiDraft) saveWithCreation(ctx context.Context, session core.Session, f
 	d.request.predecessors, _ = mergeFAIPCL(committed.sync.predecessors, nil)
 	d.request.modified = time.Time(committed.object.Properties[core.LastModifiedAt].(core.Timestamp))
 	d.finishSave(flags)
-	return row, !exists, nil
+	d.acknowledgedCN = 0
+	if !serverWins {
+		d.acknowledgedCN = row.cn
+	}
+	return row, !exists, serverWins, nil
 }
 func (s *ramStore) faiRowLocked(ctx context.Context, root uint64, id core.ID, previous *faiNamespace) (messageRow, error) {
 	var objects []core.Object
@@ -534,10 +542,11 @@ func (s *ramStore) commitFAINamespace(ctx context.Context, session core.Session,
 			return messageRow{}, core.ErrNotFound
 		}
 	}
-	total, err := s.validateAbsentFAI(records, absent)
+	total, err := s.validateFAIHistory(records, absent)
 	if err != nil {
 		return messageRow{}, err
 	}
+	activeBytes := 0
 	seenSources := map[[22]byte]bool{}
 	for id, r := range records {
 		if r.object.ID != id {
@@ -555,11 +564,14 @@ func (s *ramStore) commitFAINamespace(ctx context.Context, session core.Session,
 		}
 		r.bytes = n
 		records[id] = r
-		total += n
+		if !r.deleted {
+			activeBytes += n
+		}
 	}
-	if len(records) > maxFAIObjects || total > maxFAIStoreBytes {
+	if activeFAICount(records) > maxFAIObjects || activeBytes > maxFAIStoreBytes {
 		return messageRow{}, core.ErrUnsupported
 	}
+	total += activeBytes
 	lease, err := s.reserveContentsMemory(total)
 	if err != nil {
 		return messageRow{}, err
@@ -686,7 +698,7 @@ func (s *ramStore) deleteContentsChanges(ctx context.Context, session core.Sessi
 		if len(normal) != 0 {
 			return nil, core.ErrConflict
 		}
-		if _, err := s.validateAbsentFAI(records, absent); err != nil {
+		if _, err := s.validateFAIHistory(records, absent); err != nil {
 			return nil, err
 		}
 		if err := s.softDeleteContacts(ctx, session, root, personal, contacts); err != nil {
@@ -701,7 +713,7 @@ func (s *ramStore) deleteContentsChanges(ctx context.Context, session core.Sessi
 		if folder != anchor || folder.native == "" {
 			return nil, core.ErrUnsupported
 		}
-		if _, err := s.validateAbsentFAI(records, absent); err != nil {
+		if _, err := s.validateFAIHistory(records, absent); err != nil {
 			return nil, err
 		}
 		box := session.Mailbox()

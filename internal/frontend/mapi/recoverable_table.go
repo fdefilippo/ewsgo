@@ -150,7 +150,7 @@ func (s *ramStore) assignRecoverableMIDs(ctx context.Context, references []recov
 		}
 		newBytes += len(ref.origin)
 	}
-	if s.mappingCountLocked()+newMappings > maxRAMMappings || s.next+uint64(newMappings) >= 1<<48 || newBytes > recoverableMappingBudget-s.recoverableBytes {
+	if s.mappingCountLocked()+newMappings > s.mappingLimit() || s.next+uint64(newMappings) >= 1<<48 || newBytes > recoverableMappingBudget-s.recoverableBytes {
 		return nil, core.ErrUnsupported
 	}
 	var lease *contentsLease

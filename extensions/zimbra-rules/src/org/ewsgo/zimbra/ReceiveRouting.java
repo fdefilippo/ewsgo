@@ -44,8 +44,8 @@ final class ReceiveRouting implements LmtpCallback {
     }
 
     void register(DocumentDispatcher dispatcher) {
-        dispatcher.registerHandler(READ, new RoutingHandler(false));
-        dispatcher.registerHandler(SET, new RoutingHandler(true));
+        dispatcher.registerHandler(READ, new RoutingHandler(RoutingOperation.READ));
+        dispatcher.registerHandler(SET, new RoutingHandler(RoutingOperation.SET));
     }
 
     void deregister(DocumentDispatcher dispatcher) {
@@ -199,11 +199,13 @@ final class ReceiveRouting implements LmtpCallback {
         // There is no local message to move.
     }
 
-    private static final class RoutingHandler extends DocumentHandler {
-        private final boolean write;
+    private enum RoutingOperation { READ, SET }
 
-        RoutingHandler(boolean write) {
-            this.write = write;
+    private static final class RoutingHandler extends DocumentHandler {
+        private final RoutingOperation operation;
+
+        RoutingHandler(RoutingOperation operation) {
+            this.operation = operation;
         }
 
         @Override
@@ -215,7 +217,7 @@ final class ReceiveRouting implements LmtpCallback {
             mailbox.lock(true);
             try {
                 Map<String, Route> routes = read(mailbox, op);
-                if (write) {
+                if (operation == RoutingOperation.SET) {
                     return change(request, soap, mailbox, op, routes);
                 }
                 Element response = soap.createElement(QName.get("ReadReceiveFoldersResponse", NS));

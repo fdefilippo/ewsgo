@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"ewsgo/internal/core"
+	"ewsgo/internal/mapireplica"
 )
 
 const (
@@ -70,7 +71,7 @@ func (s *ramStore) projectContentsPayload(row messageRow) (projectedMessage, err
 		return projectCalendarSearchItem(row)
 	}
 	if !row.associated {
-		return projectMailContents(row.object)
+		return projectReadableMailContents(row.object)
 	}
 	if _, err := s.validateFAIRecord(faiRecord{folder: row.parent, object: row.object}); err != nil {
 		return projectedMessage{}, err
@@ -188,7 +189,7 @@ func validateContentsTransfer(c synchronizationConfigure, delta contentsDelta) e
 	// Contradictory categories cannot be emitted even if each IDSET encodes.
 	classified := map[uint64]byte{}
 	for group, ids := range [][]uint64{delta.deleted, delta.noLonger, delta.read, delta.unread} {
-		if len(ids) > maxRAMMappings {
+		if len(ids) > mapireplica.MaxBindings {
 			return core.ErrUnsupported
 		}
 		for _, id := range ids {
@@ -536,7 +537,7 @@ func (f *fastTransfer) messageIDRanges(replica [16]byte, tag uint32, ids []uint6
 	if len(ids) == 0 && len(retired) == 0 {
 		return nil
 	}
-	if len(ids) > maxRAMMappings {
+	if len(ids) > mapireplica.MaxBindings {
 		return core.ErrUnsupported
 	}
 	ranges := make([]idRange, 0, len(ids)+len(retired))

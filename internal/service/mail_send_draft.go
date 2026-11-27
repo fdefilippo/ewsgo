@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"net/mail"
 	"strings"
@@ -42,7 +41,7 @@ func (s *MailSender) SendDraft(ctx context.Context, account core.Session, draft 
 		return core.SendObservation{}, err
 	}
 	input := core.SendInput{DraftID: draft.ID, Revision: draft.Revision, MIMEDigest: sha256.Sum256(raw)}
-	key := sha256.Sum256(append(binary.LittleEndian.AppendUint64([]byte("ewsgo:draft-send:v1\x00"), uint64(draft.Revision)), draft.ID...))
+	key := core.DraftSendKey(draft.ID, draft.Revision)
 	intent, err := s.store.PrepareCorrelatedSend(ctx, mailbox.MailboxID, input, key)
 	if err != nil {
 		return core.SendObservation{}, err
@@ -59,12 +58,27 @@ func (s *MailSender) SendDraft(ctx context.Context, account core.Session, draft 
 	return evidence, err
 }
 
+func (s *MailSender) RecoverDraftSend(ctx context.Context, account core.Session, draft core.ID, revision core.Revision) (core.SendState, error) {
+	mailbox, err := s.store.BindMailbox(ctx, account.Identity().Scope, s.backendInstance)
+	if err != nil {
+		return 0, err
+	}
+	return s.store.RecoverCorrelatedDraftSend(ctx, mailbox.MailboxID, draft, revision, core.DraftSendKey(draft, revision))
+}
+
 func validateDraftSubmission(raw []byte, actor string) (string, error) {
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
 		return "", core.ErrInvalid
 	}
 	for field := range msg.Header {
+		// net/mail retains noncanonical names it accepts. Reject names another
+		// mail parser could interpret differently before checking the sender.
+		for i := range len(field) {
+			if c := field[i]; c < 33 || c > 126 || c == ':' {
+				return "", core.ErrInvalid
+			}
+		}
 		if strings.HasPrefix(field, "Resent-") {
 			return "", core.ErrUnsupported
 		}

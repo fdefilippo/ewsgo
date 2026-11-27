@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,7 +85,9 @@ func TestMailContentIndexVerifiesCompleteStableMembership(t *testing.T) {
 				case "SearchRequest":
 					searchReads++
 					offset := req.get("offset")
-					if req.get("types") != "message" || req.get("limit") != "100" {
+					types := req.get("types")
+					if req.get("limit") != "100" || req.get("includeTagDeleted") != "0" ||
+						(types != "message" && (scenario != "missing_member" || types != "message,contact,appointment,task,document")) {
 						t.Error("unexpected search scope")
 					}
 					if offset == "0" {
@@ -135,6 +138,61 @@ func TestMailContentIndexVerifiesCompleteStableMembership(t *testing.T) {
 				if !errors.Is(err, core.ErrConflict) || len(got.Messages) != 0 {
 					t.Fatal("incomplete or changing membership produced an index")
 				}
+			}
+		})
+	}
+}
+
+func TestMailFolderObservationVerifiesMixedMembership(t *testing.T) {
+	for _, scenario := range []string{"complete", "truncated mixed search", "mail revisions disagree", "IMAP deleted hit"} {
+		t.Run(scenario, func(t *testing.T) {
+			client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var message node
+				if err := xml.NewDecoder(r.Body).Decode(&message); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				req := message.child(soapNS, "Body").Children[0]
+				switch req.XMLName.Local {
+				case "GetFolderRequest":
+					envelope(w, `<GetFolderResponse xmlns="urn:zimbraMail"><folder id="1"><folder id="3" l="1" view="message" n="3" i4n="4" i4ms="8"/></folder></GetFolderResponse>`)
+				case "SearchRequest":
+					if req.get("offset") != "0" || req.get("includeTagDeleted") != "0" || req.child(mailNS, "query").Text != "inid:3" {
+						t.Error("folder index used a different IMAP visibility rule or scope")
+					}
+					mail := `<m id="1001" l="3" rev="7"/>`
+					if scenario == "IMAP deleted hit" {
+						mail = `<m id="1001" l="3" rev="7" f="x"/>`
+					}
+					rows := mail
+					if req.get("types") != "message" {
+						if scenario == "mail revisions disagree" {
+							rows = `<m id="1001" l="3" rev="8"/>`
+						}
+						rows += `<cn id="1002" l="3"/>`
+						if scenario != "truncated mixed search" {
+							rows += `<appt id="1003" l="3"/>`
+						}
+					}
+					envelope(w, `<SearchResponse xmlns="urn:zimbraMail" offset="0" more="0">`+rows+`</SearchResponse>`)
+				default:
+					t.Error("unexpected backend operation")
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}, Config{})
+			box := &mailbox{native: &Session{client: client, token: fixtureToken, expires: time.Now().Add(time.Hour)}}
+			got, err := box.ObserveMailFolder(t.Context(), "f:3", nil)
+			if scenario == "complete" {
+				if err != nil || got.MessageCount != 1 || !slices.Equal(got.MessageIDs, []core.ID{"m:1001"}) {
+					t.Fatalf("wrong typed membership: count=%d error=%v", got.MessageCount, err)
+				}
+				same, err := box.ObserveMailFolder(t.Context(), "f:3", &got.Sequence)
+				if err != nil || !same.CountOmitted || len(same.MessageIDs) != 0 {
+					t.Fatalf("unchanged mixed marker forced a scan: %v", err)
+				}
+			} else if !errors.Is(err, core.ErrConflict) || len(got.MessageIDs) != 0 {
+				t.Fatalf("unverified membership became visible: %v", err)
 			}
 		})
 	}

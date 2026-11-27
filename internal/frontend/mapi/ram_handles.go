@@ -133,9 +133,6 @@ func (s *mailboxObjects) openFolder(ctx context.Context, session core.Session, l
 	if code != 0 {
 		return 0, storeFolder{}, code
 	}
-	if !object.isLogon && object.fid != fid {
-		return 0, storeFolder{}, 0x80070057
-	}
 	if object.download != nil {
 		return 0, storeFolder{}, NotSupported
 	}
@@ -162,10 +159,11 @@ func (s *mailboxObjects) release(handle uint32) {
 	}
 	if object.isLogon {
 		for id, child := range s.objects {
-			if child.logon == object.logon {
+			if id != handle && child.logon == object.logon {
 				s.discard(id, child)
 			}
 		}
+		s.discard(handle, object)
 		delete(s.logons, object.logon)
 	} else {
 		s.discard(handle, object)
@@ -174,6 +172,7 @@ func (s *mailboxObjects) release(handle uint32) {
 
 func (s *mailboxObjects) discard(handle uint32, object serverObject) {
 	if object.isLogon {
+		defer object.binding.releasePin()
 		s.perUser.releaseLogon(object.logon)
 		if object.spooler {
 			object.binding.store.unlockSpoolerOwner(handle)
@@ -215,6 +214,9 @@ func (s *mailboxObjects) discard(handle uint32, object serverObject) {
 
 // Called only while a context is exclusively owned or idle and being dropped.
 func (s *mailboxObjects) close() {
+	for _, handle := range s.logons {
+		s.release(handle)
+	}
 	for handle, object := range s.objects {
 		s.discard(handle, object)
 	}

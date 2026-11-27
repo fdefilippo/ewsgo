@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"ewsgo/internal/core"
@@ -57,6 +58,58 @@ type openMessageFixtureMailbox struct {
 	*messageFixtureMailbox
 	envelopeReads int
 	softDeleted   bool
+}
+
+type readOnlyDraftFixture struct {
+	*openMessageFixtureMailbox
+	core.MailDraftWriter
+	folder     core.ID
+	err        error
+	draftReads int
+}
+
+func (b *readOnlyDraftFixture) Get(ctx context.Context, id core.ID) (core.Object, error) {
+	object, err := b.openMessageFixtureMailbox.Get(ctx, id)
+	if err == nil && id == b.folder {
+		object.Properties = core.Properties{core.WellKnown: core.Text("drafts")}
+	}
+	return object, err
+}
+
+func (b *readOnlyDraftFixture) ReadMailMessageMIME(context.Context, core.ID, core.ID, bool) (core.Object, error) {
+	b.draftReads++
+	return core.Object{}, b.err
+}
+
+func TestOpenMessageTreatsWrappedUnsupportedLikeBareError(t *testing.T) {
+	f, base := newContentsDownloadFixture(t)
+	f.transport.EnableMailDrafts(existingDraftOnly{})
+	base.objects[0].Properties[core.IsDraft] = core.Bool(true)
+	box := &readOnlyDraftFixture{
+		openMessageFixtureMailbox: &openMessageFixtureMailbox{messageFixtureMailbox: base},
+		folder:                    base.objects[0].Parent,
+	}
+	f.session = &testSession{box}
+	fid := f.fids[Inbox]
+	store := f.state.mailbox.objects[f.handles[0]].binding.store
+	messages, err := store.observeMailMessages(t.Context(), f.session, fid)
+	if err != nil || len(messages.messages) != 1 {
+		t.Fatal("could not bind draft fixture", err)
+	}
+	mid := messages.messages[0].mid
+	for _, source := range []error{core.ErrUnsupported, fmt.Errorf("fixture: %w", core.ErrUnsupported)} {
+		box.err = source
+		before := box.draftReads
+		faiRunOK(t, f, openMessageOperation(4, 0, 2, fid, mid, 0x0fff, 3))
+		if object := f.state.mailbox.objects[f.handles[2]]; object.message == nil || object.message.mailDraft != nil {
+			t.Fatal("best-access open did not fall back to read-only")
+		}
+		faiRunOK(t, f, []byte{1, 4, 2})
+		out, _ := f.run(openMessageOperation(4, 0, 2, fid, mid, 0x0fff, 1))
+		if !bytes.Equal(out, ropError(3, 2, NotSupported)) || box.draftReads != before+2 {
+			t.Fatal("explicit edit did not return the same backend error status")
+		}
+	}
 }
 
 func (b *openMessageFixtureMailbox) ReadMailMessageEnvelope(_ context.Context, folder, id core.ID, includeSoftDeleted bool) (core.Object, error) {

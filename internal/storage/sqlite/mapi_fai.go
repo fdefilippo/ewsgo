@@ -146,7 +146,8 @@ func (s *Store) CommitMAPIFAI(ctx context.Context, mailboxID string, expected MA
 
 func boundedMAPIFAIChanges(changes MAPIFAIChanges) bool {
 	return len(changes.Objects) <= maxMAPIFAIObjects+1 && len(changes.Tombstones) <= maxMAPIFAIObjects &&
-		len(changes.ForgetObjects) <= maxMAPIFAIObjects+1 && len(changes.ForgetTombstones) <= maxMAPIFAIObjects
+		len(changes.ForgetObjects) <= maxMAPIFAIObjects+mapireplica.MaxFAITombstones+1 &&
+		len(changes.ForgetTombstones) <= mapireplica.MaxFAITombstones
 }
 
 func writeMAPIFAI(ctx context.Context, tx *sql.Tx, mailboxID string, versions []MAPIProjectionVersion, changes MAPIFAIChanges) error {
@@ -235,17 +236,24 @@ func checkMAPIFAIWrite(result sql.Result, err error) error {
 }
 
 func checkMAPIFAIQuota(ctx context.Context, tx *sql.Tx, mailboxID string) error {
-	var objects, config, tombstones, used int
+	var active, config, absent, deleted, activeBytes, deletedBytes int
 	err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(sum(1-private_config), 0), COALESCE(sum(private_config), 0),
-		  (SELECT count(*) FROM mapi_fai_tombstones WHERE mailbox_id = ?),
-		  COALESCE(sum(cache_bytes*(1-private_config)), 0)
-		FROM mapi_fai_objects WHERE mailbox_id = ?
-	`, mailboxID, mailboxID).Scan(&objects, &config, &tombstones, &used)
+		SELECT count(*) FILTER (WHERE o.private_config = 0 AND v.is_present = 1),
+		       count(*) FILTER (WHERE o.private_config = 1),
+		       (SELECT count(*) FROM mapi_fai_tombstones WHERE mailbox_id = ?),
+		       count(*) FILTER (WHERE o.private_config = 0 AND v.is_present = 0),
+		       COALESCE(sum(o.cache_bytes) FILTER (WHERE o.private_config = 0 AND v.is_present = 1), 0),
+		       COALESCE(sum(o.cache_bytes) FILTER (WHERE o.private_config = 0 AND v.is_present = 0), 0)
+		FROM mapi_fai_objects AS o
+		JOIN mapi_projection_versions AS v USING (mailbox_id, counter)
+		WHERE o.mailbox_id = ?
+	`, mailboxID, mailboxID).Scan(&active, &config, &absent, &deleted, &activeBytes, &deletedBytes)
 	if err != nil {
 		return fmt.Errorf("check private MAPI quota: %w", err)
 	}
-	if objects+tombstones > maxMAPIFAIObjects || config > 1 || used+tombstones*mapiFAITombstoneBytes > maxMAPIFAIBytes {
+	if active > maxMAPIFAIObjects || config > 1 || activeBytes > maxMAPIFAIBytes ||
+		deleted+absent > mapireplica.MaxFAITombstones ||
+		deletedBytes+absent*mapiFAITombstoneBytes > mapireplica.MaxFAITombstoneBytes {
 		return core.ErrUnsupported
 	}
 	return nil

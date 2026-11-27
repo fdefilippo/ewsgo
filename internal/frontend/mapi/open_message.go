@@ -305,7 +305,7 @@ func openStoreMessage(ctx context.Context, session core.Session, state *contextS
 			}
 		} else if editMail && row.special == 0 && !message.includeSoftDeleted && row.object.Properties[core.IsDraft] == core.Bool(true) {
 			message.mailDraft, err = store.editMailDraft(ctx, session, row)
-			if err != nil && (mode == 1 || err != core.ErrUnsupported) {
+			if err != nil && (mode == 1 || !errors.Is(err, core.ErrUnsupported)) {
 				return fail(faiError(err, false))
 			}
 		} else if mode == 1 {
@@ -712,21 +712,13 @@ func openedMessageProperty(row messageRow, binding storeBinding, tag uint32, uni
 	case 0x0e07:
 		var flags uint32
 		if row.special == 0 {
-			read, known := row.object.Properties[core.IsRead].(core.Bool)
+			_, known := row.object.Properties[core.IsRead].(core.Bool)
 			if row.associated || !known {
 				return missing
 			}
-			if read {
-				flags |= 1
-			}
-			if row.object.Properties[core.IsDraft] == core.Bool(true) {
-				flags |= 8
-			}
+			flags = mailContentsFlags(row.object, row.object.Properties[core.HasAttachments] == core.Bool(true))
 			if binding.store.isQueuedSubmission(row.mid) {
 				flags |= 4
-			}
-			if row.object.Properties[core.HasAttachments] == core.Bool(true) {
-				flags |= 0x10
 			}
 		} else if row.read {
 			flags = 1

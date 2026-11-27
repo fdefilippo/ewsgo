@@ -5,7 +5,6 @@ package mapi
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"testing"
 
@@ -98,10 +97,4 @@ func TestCopyPropertiesThroughExecute(t *testing.T) {
 	if !bytes.Equal(data, []byte{0, 127, 128, 255}) || dst.staged.Properties[core.HasAttachments] != core.Bool(true) {
 		t.Fatal("CopyProperties changed the selected attachment payload")
 	}
-}
-
-type existingDraftOnly struct{}
-
-func (existingDraftOnly) CreateMailDraft(context.Context, core.Session, core.ID, string, []byte) (core.Object, error) {
-	return core.Object{}, core.ErrUnsupported
 }

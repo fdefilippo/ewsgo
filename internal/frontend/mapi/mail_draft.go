@@ -103,7 +103,7 @@ func (s *ramStore) stageMailDraft(ctx context.Context, session core.Session, fid
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.mappingCountLocked() >= maxRAMMappings {
+	if s.mappingCountLocked() >= s.mappingLimit() {
 		lease.release()
 		return nil, core.ErrLimit
 	}

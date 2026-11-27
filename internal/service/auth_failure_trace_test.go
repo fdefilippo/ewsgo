@@ -25,6 +25,18 @@ func (a authFailureProbe) Authenticate(context.Context, string, string) (core.Se
 	return nil, a.err
 }
 
+func TestEmptyBasicPasswordIsRejectedBeforeBackend(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "https://example.invalid/EWS/Exchange.asmx", nil)
+	r.SetBasicAuth("fixture@example.invalid", "")
+	w := httptest.NewRecorder()
+
+	core.BasicTLS(nil, nil).ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized || w.Header().Get("WWW-Authenticate") != `Basic realm="EWSGo", charset="UTF-8"` {
+		t.Fatalf("invalid credentials returned HTTP %d, challenge %q", w.Code, w.Header().Get("WWW-Authenticate"))
+	}
+}
+
 func TestAuthenticationFailureTraceHTTPSAndPrivacy(t *testing.T) {
 	for _, tc := range []struct {
 		name, failure, request string

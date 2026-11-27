@@ -14,8 +14,9 @@ const maxForeignReplicas = 256
 const foreignReplicaRegistryBytes = 512 + maxForeignReplicas*16
 const parameterOverflow uint32 = 0x00000450
 
-// Replica translation is not object lookup. Foreign namespaces can be converted
-// without creating a Folder/Message mapping or granting any native access.
+// MS-OXCSTOR 3.2.5.9 registers an unknown GUID during translation, without
+// checking object existence. Only the REPLID table changes. Object bindings
+// and native access still require their own scope and object checks.
 // The local replica is always 1. Foreign REPLIDs are never evicted or reused.
 func (s *ramStore) replicaID(ctx context.Context, guid [16]byte) (uint16, uint32) {
 	s.mu.Lock()

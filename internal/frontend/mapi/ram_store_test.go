@@ -7,11 +7,196 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"ewsgo/internal/core"
+	"ewsgo/internal/storage/sqlite"
 )
+
+func TestRAMStoreBindsOtherMailboxWhilePersistentLoadIsPending(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "stores.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, _, session := ramFixture(t)
+	catalog, err := privateFolders(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow, fast := catalog, catalog
+	slow.scope.Account = "slow"
+	fast.scope.Account = "fast"
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	var loads atomic.Int32
+	var resume sync.Once
+	stopWaiting := func() { resume.Do(func() { close(unblock) }) }
+	defer stopWaiting()
+	stores := newRAMStores()
+	stores.replicaStorage = func(ctx context.Context, scope core.Scope) (boundReplica, error) {
+		if scope == slow.scope {
+			if loads.Add(1) == 1 {
+				close(entered)
+			}
+			select {
+			case <-ctx.Done():
+				return boundReplica{}, ctx.Err()
+			case <-unblock:
+			}
+		}
+		account, err := db.BindMailbox(ctx, scope, "test")
+		return boundReplica{store: db, mailbox: account.MailboxID}, err
+	}
+	type result struct {
+		binding storeBinding
+		err     error
+	}
+	bind := func(ctx context.Context, catalog privateFolderCatalog) <-chan result {
+		resultCh := make(chan result, 1)
+		go func() {
+			binding, err := stores.bind(ctx, catalog)
+			binding.releasePin()
+			resultCh <- result{binding, err}
+		}()
+		return resultCh
+	}
+	await := func(outcome <-chan result) result {
+		t.Helper()
+		select {
+		case got := <-outcome:
+			return got
+		case <-ctx.Done():
+			t.Fatal("logon did not finish")
+			return result{}
+		}
+	}
+	first := bind(ctx, slow)
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("durable load did not start")
+	}
+	second := bind(ctx, slow)
+	waitCtx, cancelWait := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancelWait()
+	if got := await(bind(waitCtx, slow)); !errors.Is(got.err, context.DeadlineExceeded) {
+		t.Fatalf("waiting logon returned %v", got.err)
+	}
+	independent := await(bind(ctx, fast))
+	if independent.err != nil {
+		t.Fatalf("independent mailbox could not log on: %v", independent.err)
+	}
+	stopWaiting()
+	a, b := await(first), await(second)
+	if a.err != nil || b.err != nil || loads.Load() != 1 || a.binding.store != b.binding.store ||
+		a.binding.fids != b.binding.fids || a.binding.store.replica == independent.binding.store.replica {
+		t.Fatalf("logons did not share exactly one load per mailbox: %d, %v, %v", loads.Load(), a.err, b.err)
+	}
+}
+
+func TestPersistentRAMStoresEvictOnlyAfterLastUser(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "stores.sqlite")
+	open := func() (*ramStores, *sqlite.Store) {
+		t.Helper()
+		db, err := sqlite.Open(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		stores := newRAMStores()
+		stores.replicaStorage = func(ctx context.Context, scope core.Scope) (boundReplica, error) {
+			box, err := db.BindMailbox(ctx, scope, "test")
+			return boundReplica{store: db, mailbox: box.MailboxID}, err
+		}
+		return stores, db
+	}
+	_, _, session := ramFixture(t)
+	catalog, err := privateFolders(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := func(stores *ramStores, account int) storeBinding {
+		t.Helper()
+		catalog.scope.Account = fmt.Sprintf("account-%d", account)
+		binding, err := stores.bind(ctx, catalog)
+		if err != nil {
+			t.Fatalf("bind %d: %v", account, err)
+		}
+		return binding
+	}
+	stores, db := open()
+	active := bind(stores, 0)
+	objects := newMailboxObjects(stores)
+	handle, err := objects.addLogon(0, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned := bind(stores, 1)
+	unpinScan := scanned.store.pinForScan()
+	scanned.releasePin()
+	old := bind(stores, 2)
+	member := core.Scope{Backend: catalog.scope.Backend, Account: "recipient"}
+	memberIDs, err := old.store.permissionMemberIDs(ctx, []core.Scope{member})
+	if err != nil || memberIDs[member] <= maxPermissionMembers {
+		t.Fatalf("persist ACL member outside the legacy RAM range: %v", err)
+	}
+	key := folderKey{native: "assigned-before-eviction"}
+	ids, err := old.store.assign(ctx, []folderKey{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.store.permissionMemberLease, err = old.store.reserveContentsMemory(4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.releasePin()
+	for i := 3; i < maxRAMStores+7; i++ {
+		bind(stores, i).releasePin()
+	}
+	if len(stores.entries) != maxRAMStores || stores.entries[active.store.scope] != active.store ||
+		stores.entries[scanned.store.scope] != scanned.store || stores.entries[old.store.scope] != nil {
+		t.Fatal("eviction removed a live user or retained the oldest idle mailbox")
+	}
+	if _, code := objects.logonObject(handle, 0); code != 0 || stores.contents.used != 0 {
+		t.Fatal("eviction broke the current logon or leaked the removed store's memory")
+	}
+	check := func(stores *ramStores) {
+		t.Helper()
+		reopened := bind(stores, 2)
+		defer reopened.releasePin()
+		if reopened.store == old.store || reopened.fids != old.fids ||
+			reopened.store.replica != old.store.replica || reopened.store.byKey[key] != ids[0] {
+			t.Fatal("reopening changed durable identifiers")
+		}
+		target, err := reopened.store.permissionMemberScope(ctx, memberIDs[member])
+		if err != nil || target != member {
+			t.Fatalf("ACL member changed after reopening: %v", err)
+		}
+		other := core.Scope{Backend: member.Backend, Account: "different-recipient"}
+		ids, err := reopened.store.permissionMemberIDs(ctx, []core.Scope{other, member})
+		if err != nil || ids[member] != memberIDs[member] || ids[other] == ids[member] {
+			t.Fatalf("ACL member reallocated: %v", err)
+		}
+	}
+	check(stores)
+	objects.close()
+	unpinScan()
+	if active.store.pins != 0 || scanned.store.pins != 0 {
+		t.Fatal("disconnect or notification scan leaked a store pin")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, _ := open()
+	check(restarted)
+}
 
 func ramFixture(t *testing.T) (*ramStores, storeBinding, *testSession) {
 	t.Helper()

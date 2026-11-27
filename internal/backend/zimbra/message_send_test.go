@@ -5,8 +5,10 @@ package zimbra
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,20 @@ import (
 
 const testSendUID = "abcdefghijklmnopqrstuvwxyz"
 const testSendMessageID = "fa40a7e9ae0bbe5253a8102ede6451db@ewsgo.invalid"
+
+func TestSendDialFailureCanBeRetried(t *testing.T) {
+	client := testClient(t, fakeZimbra(t), Config{})
+	session := login(t, client)
+	client.http.CloseIdleConnections()
+	client.http.Transport = &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("fixture dial failure")
+		},
+	}
+	if _, err := session.sendUploadedMIME(t.Context(), testUploadID, testSendUID); !errors.Is(err, core.ErrSendRetryable) || !errors.Is(err, core.ErrWriteNotDispatched) {
+		t.Fatalf("dial failure: %v", err)
+	}
+}
 
 func TestStageMailSendUsesOnlyUploadedMIME(t *testing.T) {
 	const mime = "To: self@example.invalid\r\nSubject: Fixture\r\n\r\nBody\r\n"
@@ -30,7 +46,11 @@ func TestStageMailSendUsesOnlyUploadedMIME(t *testing.T) {
 	}{
 		{name: "acknowledgment with Sent copy", draftRevision: 7, response: `<m id="42"/>`, wantID: "m:42"},
 		{name: "acknowledgment without copy", header: "Message-ID: <original@example.invalid>\r\n", response: `<m/>`},
-		{name: "missing upload", fault: "mail.NO_SUCH_UPLOAD", sendErr: core.ErrSendRejected},
+		{name: "missing upload", fault: "mail.NO_SUCH_UPLOAD", sendErr: core.ErrSendRetryable},
+		{name: "expired authentication", fault: "service.AUTH_EXPIRED", sendErr: core.ErrSendRetryable},
+		{name: "authentication required", fault: "service.AUTH_REQUIRED", sendErr: core.ErrSendRetryable},
+		{name: "authentication failed", fault: "account.AUTH_FAILED", sendErr: core.ErrSendRetryable},
+		{name: "malformed MIME", fault: "mail.MESSAGE_PARSE_ERROR", sendErr: core.ErrSendRejected},
 		{name: "SMTP failure may follow acceptance or partial send", fault: "mail.SEND_FAILURE", sendErr: ErrProtocol},
 		{name: "proxy lost response", sendErr: ErrProtocol},
 		{name: "invalid identifier", response: `<m id="other:42"/>`, sendErr: ErrProtocol},
@@ -95,6 +115,9 @@ func TestStageMailSendUsesOnlyUploadedMIME(t *testing.T) {
 			id, err := attempt(t.Context())
 			if !errors.Is(err, tc.sendErr) || id != tc.wantID || uploads.Load() != 1 || sends.Load() != 1 {
 				t.Fatalf("submitted: %q, %v, uploads %d, sends %d", id, err, uploads.Load(), sends.Load())
+			}
+			if errors.Is(err, core.ErrWriteNotDispatched) {
+				t.Fatal("a request received by the server was classified as not dispatched")
 			}
 		})
 	}

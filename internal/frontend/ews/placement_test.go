@@ -123,6 +123,40 @@ func TestItemPlacementWireUsesFolderIdentityAndRevision(t *testing.T) {
 	}
 }
 
+func TestItemPlacementRequiresOperationCapability(t *testing.T) {
+	item := core.Object{ID: "message", Kind: core.Message, Parent: "inbox", Revision: 1}
+	box := &placementFixture{fixtureMailbox: fixtureMailbox{objects: map[core.ID]core.Object{item.ID: item}}}
+	placement := &testSession{box: struct {
+		core.Mailbox
+		core.MailMessagePlacementWriter
+	}{box, box}}
+	softOnly := &testSession{box: struct {
+		core.Mailbox
+		core.MailMessageSoftDeleter
+	}{box, box}}
+	h := New()
+	scope := placement.Identity().Scope
+	items := el(messages, "ItemIds", "", at(el(types, "ItemId", ""), "Id", h.itemID(scope, item)))
+	target := el(messages, "ToFolderId", "", at(el(types, "FolderId", ""), "Id", h.encode(scope, "target")))
+	for _, name := range []string{"MoveItem", "CopyItem"} {
+		// DeleteType is irrelevant to MoveItem and CopyItem.
+		op := at(el(messages, name, "", target, items), "DeleteType", "SoftDelete")
+		serveWriteTest(t, h, softOnly, op, "ErrorInvalidPropertyForOperation")
+	}
+	trash := at(el(messages, "DeleteItem", "", items), "DeleteType", "MoveToDeletedItems")
+	serveWriteTest(t, h, softOnly, trash, "ErrorInvalidPropertyForOperation")
+	soft := at(el(messages, "DeleteItem", "", items), "DeleteType", "SoftDelete")
+	serveWriteTest(t, h, placement, soft, "ErrorCannotDeleteObject")
+	if box.writes != 0 {
+		t.Fatal("operation without its capability performed a write")
+	}
+	serveWriteTest(t, h, placement, el(messages, "CopyItem", "", target, items), "NoError")
+	serveWriteTest(t, h, softOnly, soft, "NoError")
+	if box.writes != 2 {
+		t.Fatalf("supported operations performed %d writes, want 2", box.writes)
+	}
+}
+
 func TestFolderPlacementWire(t *testing.T) {
 	folders := map[core.ID]core.Object{
 		"root":  {ID: "root", Kind: core.Folder},

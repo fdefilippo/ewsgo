@@ -73,7 +73,7 @@ func (s *ramStore) loadReplica(ctx context.Context, backing boundReplica) (err e
 	if err != nil {
 		return err
 	}
-	if snapshot.Version.Epoch == ([16]byte{}) || snapshot.Version.HighWater > maxGlobalCount || len(snapshot.Bindings) > maxRAMMappings {
+	if snapshot.Version.Epoch == ([16]byte{}) || snapshot.Version.HighWater > maxGlobalCount || len(snapshot.Bindings) > mapireplica.MaxBindings {
 		return core.ErrInvalid
 	}
 	defer func() {
@@ -217,7 +217,7 @@ func (s *ramStore) loadReplica(ctx context.Context, backing boundReplica) (err e
 	if err := s.loadMessageImports(snapshot.MessageImports); err != nil {
 		return err
 	}
-	if s.messageRegistryBytesLocked() > maxMessageRegistryBytes {
+	if s.messageRegistryBytesLocked() > maxPersistentMessageRegistryBytes {
 		return core.ErrUnsupported
 	}
 	if err := s.loadForeignReplicas(snapshot.Version.Epoch, snapshot.ForeignReplicas); err != nil {
@@ -254,6 +254,19 @@ func (s *ramStore) releaseReplicaLeases() {
 	s.localFreeBusyLease.release()
 	s.recoverableMIDLease.release()
 	s.foreignReplicaLease.release()
+	s.permissionMemberLease.release()
+	for _, aggregate := range s.folderAggregates {
+		aggregate.lease.release()
+	}
+	for _, proof := range s.contentsProofs {
+		proof.lease.release()
+	}
+	for p := range s.faiStatePermits {
+		p.release()
+	}
+	for _, proof := range s.faiUploadProofs {
+		proof.release()
+	}
 	for _, folder := range s.dynamic {
 		folder.criteria.releaseStatic()
 	}

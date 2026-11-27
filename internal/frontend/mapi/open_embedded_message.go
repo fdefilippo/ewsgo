@@ -48,7 +48,7 @@ func (s *ramStore) bindEmbeddedMessage(ctx context.Context, ref embeddedMessageR
 	if mid := s.embeddedMIDs[key]; mid != 0 {
 		return mid, nil
 	}
-	if s.mappingCountLocked() >= maxRAMMappings || s.next >= maxGlobalCount {
+	if s.mappingCountLocked() >= s.mappingLimit() || s.next >= maxGlobalCount {
 		return 0, core.ErrLimit
 	}
 	next := s.next + 1

@@ -12,6 +12,9 @@ import (
 // reconcile the native state before retrying, especially for a copy.
 var ErrOutcomeUnknown = errors.New("write outcome unknown")
 
+// ErrWriteNotDispatched proves that the native write was never sent.
+var ErrWriteNotDispatched = errors.New("native write not dispatched")
+
 // MailMessagePlacementWriter mutates messages in the authenticated mailbox.
 // Expected is the observed metadata revision of the source message. Backends
 // must guard it during mutation. Move, trash and restore preserve the message

@@ -223,6 +223,7 @@ func TestPropertyRevisionsContinueAfterVersionTwoMigration(t *testing.T) {
 		ALTER TABLE mailboxes DROP COLUMN journal_revision;
 		DROP TABLE mapi_spooler;
 		DROP TABLE mapi_public_read_state;
+		DROP TABLE mapi_permission_members;
 		PRAGMA user_version = 2;
 	`); err != nil {
 		t.Fatal(err)

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -18,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 28
+const schemaVersion = 29
 
 type Store struct {
 	db *sql.DB
@@ -607,6 +608,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		`); err != nil {
 			return fmt.Errorf("create SQLite schema version 28: %w", err)
 		}
+		fallthrough
+	case 28:
+		if _, err := tx.ExecContext(ctx, `
+			CREATE TABLE mapi_permission_members (
+				mailbox_id TEXT NOT NULL REFERENCES mailboxes(mailbox_id),
+				account TEXT NOT NULL CHECK (length(account) BETWEEN 1 AND 512),
+				member_id INTEGER NOT NULL CHECK (member_id >= 4611686018427387904),
+				PRIMARY KEY (mailbox_id, account),
+				UNIQUE (mailbox_id, member_id)
+			) STRICT;
+			PRAGMA user_version = 29;
+		`); err != nil {
+			return fmt.Errorf("create SQLite schema version 29: %w", err)
+		}
 	case schemaVersion:
 	default:
 		return fmt.Errorf("unsupported SQLite schema version %d (supported: %d)", version, schemaVersion)
@@ -629,6 +644,20 @@ func (s *Store) BindMailbox(ctx context.Context, scope core.Scope, backendInstan
 	if scope.Backend == "" || backendInstance == "" || scope.Account == "" {
 		return MailboxIdentity{}, core.ErrInvalid
 	}
+	const selectIdentity = `
+		SELECT mailbox_id, replica_id FROM mailboxes
+		WHERE backend_kind = ? AND backend_instance = ? AND account = ?
+	`
+	var identity MailboxIdentity
+	err := s.db.QueryRowContext(ctx, selectIdentity, scope.Backend, backendInstance, scope.Account).
+		Scan(&identity.MailboxID, &identity.ReplicaID)
+	if err == nil {
+		return identity, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return MailboxIdentity{}, fmt.Errorf("read mailbox binding: %w", err)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return MailboxIdentity{}, fmt.Errorf("begin mailbox binding: %w", err)
@@ -642,11 +671,8 @@ func (s *Store) BindMailbox(ctx context.Context, scope core.Scope, backendInstan
 	`, scope.Backend, backendInstance, scope.Account, rand.Text(), rand.Text(), rand.Text()); err != nil {
 		return MailboxIdentity{}, fmt.Errorf("insert mailbox binding: %w", err)
 	}
-	var identity MailboxIdentity
-	if err := tx.QueryRowContext(ctx, `
-		SELECT mailbox_id, replica_id FROM mailboxes
-		WHERE backend_kind = ? AND backend_instance = ? AND account = ?
-	`, scope.Backend, backendInstance, scope.Account).Scan(&identity.MailboxID, &identity.ReplicaID); err != nil {
+	if err := tx.QueryRowContext(ctx, selectIdentity, scope.Backend, backendInstance, scope.Account).
+		Scan(&identity.MailboxID, &identity.ReplicaID); err != nil {
 		return MailboxIdentity{}, fmt.Errorf("read mailbox binding: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

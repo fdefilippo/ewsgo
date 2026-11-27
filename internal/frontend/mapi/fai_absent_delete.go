@@ -3,19 +3,52 @@
 
 package mapi
 
-import "ewsgo/internal/core"
+import (
+	"ewsgo/internal/core"
+	"ewsgo/internal/mapireplica"
+)
 
 const faiAbsentRecordBytes = 128
 
 // Called with contentsMu. An absent deletion retains only its SourceKey and
 // folder. It never becomes a Message object or consumes a MID/change number.
-// Existing and absent tombstones share the namespace's object and memory limits.
-func (s *ramStore) validateAbsentFAI(records map[core.ID]faiRecord, absent map[[22]byte]uint64) (int, error) {
-	if len(records)+len(absent) > maxFAIObjects {
+// Existing and absent tombstones share a separate historical quota.
+func (s *ramStore) validateFAIHistory(records map[core.ID]faiRecord, absent map[[22]byte]uint64) (int, error) {
+	if len(records)-activeFAICount(records)+len(absent) > mapireplica.MaxFAITombstones {
 		return 0, core.ErrUnsupported
 	}
+	used := faiAbsentRecordBytes * len(absent)
+	for _, record := range records {
+		if record.deleted {
+			n, err := s.validateFAIRecord(record)
+			if err != nil {
+				return 0, err
+			}
+			used += n
+		}
+	}
+	if used > mapireplica.MaxFAITombstoneBytes {
+		return 0, core.ErrUnsupported
+	}
+	if len(absent) == 0 {
+		return used, nil
+	}
+	blockedReplicas := make(map[[16]byte]bool)
+	for _, record := range records {
+		if record.sync == nil {
+			continue
+		}
+		if _, exists := absent[record.sync.source]; exists {
+			return 0, core.ErrInvalid
+		}
+		for replica, local := range record.sync.predecessors {
+			if len(local) != 6 {
+				blockedReplicas[replica] = true
+			}
+		}
+	}
 	for source, folder := range absent {
-		if !validFAIXID(source) {
+		if !validFAIXID(source) || blockedReplicas[gidChangeXID(source).namespace()] {
 			return 0, core.ErrInvalid
 		}
 		s.mu.Lock()
@@ -24,18 +57,6 @@ func (s *ramStore) validateAbsentFAI(records map[core.ID]faiRecord, absent map[[
 		if !known {
 			return 0, core.ErrInvalid
 		}
-		ns := gidChangeXID(source).namespace()
-		for _, record := range records {
-			if record.sync == nil {
-				continue
-			}
-			if record.sync.source == source {
-				return 0, core.ErrInvalid
-			}
-			if local, exists := record.sync.predecessors[ns]; exists && len(local) != 6 {
-				return 0, core.ErrInvalid
-			}
-		}
 	}
-	return faiAbsentRecordBytes * len(absent), nil
+	return used, nil
 }

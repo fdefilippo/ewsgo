@@ -245,7 +245,7 @@ func (s *contentsState) validateSetDiagnostic(set idSet, property uint32) (conte
 	provisional.active, provisional.retired = splitRetiredGiven(contentsRanges(set), s.store.retiredMIDs[s.root])
 	givenLimit := uint64(len(s.store.byMID))
 	if s.store.durable.store != nil {
-		givenLimit = min(givenLimit+maxFAICollectorChanges, maxRAMMappings)
+		givenLimit = min(givenLimit+maxFAICollectorChanges, uint64(s.store.mappingLimit()))
 	}
 	cardinality := uint64(0)
 	for _, r := range provisional.active {

@@ -11,7 +11,9 @@ import (
 )
 
 // ClaimMailDraftCreation reserves one native creation for this exact MIME and
-// mailbox. A previously claimed request can only be observed.
+// mailbox. A previously claimed request can only be observed. Keep confirmed
+// claims after native deletion: the caller can replay a reference without an
+// expiry and the missing draft alone cannot distinguish a retry from creation.
 func (s *Store) ClaimMailDraftCreation(ctx context.Context, mailbox string, folder core.ID, reference string, digest [32]byte) (bool, core.ID, error) {
 	if mailbox == "" || folder == "" || !core.ValidDraftReference(reference) {
 		return false, "", core.ErrInvalid

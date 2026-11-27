@@ -216,7 +216,7 @@ func TestDatabaseCopiesRejectExistingDestinationsAndInvalidSources(t *testing.T)
 	}
 }
 
-func TestRestoreRejectsInconsistentArchive(t *testing.T) {
+func TestRestoreValidatesOlderArchiveBeforeMigration(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "inconsistent.sqlite")
@@ -227,6 +227,26 @@ func TestRestoreRejectsInconsistentArchive(t *testing.T) {
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `
+		DROP TABLE mapi_permission_members;
+		PRAGMA user_version = 28;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	migrated := filepath.Join(dir, "migrated.sqlite")
+	if err := Restore(ctx, archive, migrated); err != nil {
+		t.Fatalf("restore of valid archive failed: %v", err)
+	}
+	restored, err := openDatabase(migrated, "ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	var version int
+	if err := restored.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("restored schema version: %d, %v", version, err)
+	}
+
+	if _, err := conn.ExecContext(ctx, `
 		PRAGMA foreign_keys = OFF;
 		INSERT INTO journal (mailbox_id, revision, kind, object_id, parent_id, previous_parent_id)
 		VALUES ('missing-mailbox', 1, 1, 'orphan', '', '');
@@ -234,10 +254,14 @@ func TestRestoreRejectsInconsistentArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(dir, "restored.sqlite")
-	if err := Restore(ctx, archive, destination); err == nil || !strings.Contains(err.Error(), "failed foreign key check") {
+	if err := Restore(ctx, archive, destination); err == nil ||
+		!strings.Contains(err.Error(), "check snapshot before migration: restored database failed foreign key check") {
 		t.Fatalf("restore did not reject orphaned data: %v", err)
 	}
 	assertStoreFileAbsent(t, destination)
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != 28 {
+		t.Fatalf("source schema version changed: %d, %v", version, err)
+	}
 }
 
 func assertStoreFileAbsent(t *testing.T, path string) {

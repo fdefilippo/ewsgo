@@ -41,7 +41,7 @@ func (m *mailbox) ReadMailContents(ctx context.Context, folder core.ID) (core.Ma
 	case mailContentCaptures <- struct{}{}:
 		defer func() { <-mailContentCaptures }()
 	default:
-		return core.MailContents{}, ErrLimit
+		return core.MailContents{}, errors.Join(core.ErrLimit, ErrLimit)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -49,6 +49,9 @@ func (m *mailbox) ReadMailContents(ctx context.Context, folder core.ID) (core.Ma
 		result, err := m.readMailContents(ctx, native)
 		if err == nil {
 			return result, nil
+		}
+		if errors.Is(err, ErrLimit) {
+			return core.MailContents{}, errors.Join(core.ErrLimit, err)
 		}
 		if !errors.Is(err, core.ErrConflict) {
 			return core.MailContents{}, semanticError(err)
@@ -122,7 +125,7 @@ func (m *mailbox) readMailContents(ctx context.Context, folder string) (core.Mai
 		if err != nil {
 			return core.MailContents{}, mailContentRace(err)
 		}
-		if first.message.Folder != folder {
+		if first.message.Folder != folder || strings.ContainsRune(first.message.Flags, 'x') {
 			return core.MailContents{}, core.ErrConflict
 		}
 		metadataBytes := first.bytes()
@@ -269,7 +272,7 @@ func (s *Session) mailContentIndex(ctx context.Context, folder string) ([]string
 	// folder clause, unlike UNDERID (Zimbra 10.1.20 QueryParser). types=message
 	// prevents appointment/task reads even for the native root or mixed trees.
 	request := element(mailNS, "SearchRequest", "", element(mailNS, "query", "inid:"+folder))
-	for name, value := range map[string]string{"types": "message", "limit": strconv.Itoa(core.MaxMailContentMessages + 1), "offset": "0", "sortBy": "dateDesc"} {
+	for name, value := range map[string]string{"types": "message", "limit": strconv.Itoa(core.MaxMailContentMessages + 1), "offset": "0", "sortBy": "dateDesc", "includeTagDeleted": "0"} {
 		request = attr(request, name, value)
 	}
 	response, err := s.request(ctx, mailNS, "Search", "", request)
@@ -299,6 +302,9 @@ func (s *Session) mailContentIndex(ctx context.Context, folder string) ([]string
 			return nil, ErrProtocol
 		}
 		seen[n.get("id")] = true
+		if strings.ContainsRune(n.get("f"), 'x') {
+			return nil, core.ErrConflict
+		}
 		if len(ids) >= core.MaxMailContentMessages {
 			return nil, ErrLimit
 		}
@@ -471,10 +477,9 @@ func mailContentRecipients(n node) ([]core.Recipient, error) {
 }
 
 // Zimbra 10 ContentServlet sync=1 emits native X-Zimbra-Modified in milliseconds
-// and also prepends metadata to its body. That body is deliberately NOT used as
-// MIME. The original REST MIME is fetched independently and bracketed by ms/rev.
+// on HEAD. The original REST MIME is fetched independently and bracketed by ms/rev.
 func (s *Session) mailContentModified(ctx context.Context, id string) (time.Time, string, error) {
-	return s.mailContentInfo(ctx, http.MethodGet, url.Values{"id": {id}, "sync": {"1"}})
+	return s.mailContentInfo(ctx, http.MethodHead, url.Values{"id": {id}, "sync": {"1"}})
 }
 
 func (s *Session) mailContentInfo(ctx context.Context, method string, query url.Values) (time.Time, string, error) {

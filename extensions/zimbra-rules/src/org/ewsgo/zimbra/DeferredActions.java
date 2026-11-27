@@ -97,7 +97,8 @@ final class DeferredActions implements LmtpCallback {
             String definition = rule.getName().substring(separator + SUFFIX.length());
             byte[] wire = decode(definition, MAX_DEFINITION, true);
             String digest = digest(wire);
-            if (!validDefinition(wire) || rule.getFilterActions().stream().noneMatch(action ->
+            List<FilterAction> actions = rule.getFilterActions();
+            if (!validDefinition(wire) || actions == null || actions.stream().noneMatch(action ->
                     action instanceof FilterAction.TagAction tag && (MARKER + digest).equals(tag.getTag()))) {
                 throw ServiceException.INVALID_REQUEST("invalid deferred action rule", null);
             }

@@ -114,6 +114,9 @@ func (s *Session) writeMessagePlacement(ctx context.Context, id, folder string, 
 }
 
 func messageWriteError(err error) error {
+	if errors.Is(err, core.ErrWriteNotDispatched) {
+		return errors.Join(core.ErrWriteNotDispatched, semanticError(err))
+	}
 	mapped := semanticError(err)
 	if errors.Is(mapped, core.ErrNotFound) || errors.Is(mapped, core.ErrAccessDenied) || errors.Is(mapped, core.ErrAuthentication) {
 		return mapped

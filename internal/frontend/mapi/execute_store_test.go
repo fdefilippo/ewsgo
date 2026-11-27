@@ -308,3 +308,50 @@ func TestStoreExecuteUnknownFlagsAndOversizedOutputAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenFolderUsesTargetFIDWithinTheHandleStore(t *testing.T) {
+	transport, session, box, cookies := storeFixture(t)
+	identity, _ := transport.namespace.Mailbox(session.Identity())
+	body, cookies := storeExecute(t, transport, session, cookies, logonOperation(identity.LegacyDN, 7, 0),
+		[]uint32{0xffffffff, 0xffffffff, 0xffffffff}, 4096)
+	logon := storeResponse(t, body)
+	inbox := binary.LittleEndian.Uint64(logon.Operations[7+int(Inbox)*8:])
+	sent := binary.LittleEndian.Uint64(logon.Operations[7+int(SentItems)*8:])
+	body, cookies = storeExecute(t, transport, session, cookies, folderOperation(inbox, 7, 0, 1), logon.Handles, 4096)
+	opened := storeResponse(t, body)
+	if binary.LittleEndian.Uint32(opened.Operations[2:]) != 0 || opened.Handles[1] == 0xffffffff {
+		t.Fatal("OpenFolder from Logon failed")
+	}
+	check := func(fid uint64, logonID byte, expected uint32) {
+		t.Helper()
+		body, next := storeExecute(t, transport, session, cookies, folderOperation(fid, logonID, 1, 2), opened.Handles, 4096)
+		cookies = next
+		reply := storeResponse(t, body)
+		if code := binary.LittleEndian.Uint32(reply.Operations[2:]); code != expected || (reply.Handles[2] == 0xffffffff) != (expected != 0) {
+			t.Fatalf("OpenFolder status 0x%08x and handles %v, want 0x%08x", code, reply.Handles, expected)
+		}
+	}
+	check(inbox, 7, 0)
+	check(sent, 7, 0)
+	check(sent, 8, accessDenied)
+	check(0xffffffffffffffff, 7, PropertyNotFound)
+	box.getErr = core.ErrAccessDenied
+	check(sent, 7, accessDenied)
+}
+
+func TestSpecificPropertiesSlotBoundAccountsForEitherObjectType(t *testing.T) {
+	for _, tag := range []uint32{freeBusyEntryIDsTag, folderEntryIDTag, uint32(0x0037001f)} {
+		request := specificProperties{tags: []uint32{tag}}
+		folder := specificPropertiesObjectBound(request, -1, nil, false)
+		message := specificPropertiesObjectBound(request, -1, nil, true)
+		if folder == message {
+			t.Fatalf("fixture tag %#x has identical bounds for both types", tag)
+		}
+		if got := specificPropertiesSlotBound(request, -1, nil, true, true); got != max(folder, message) {
+			t.Fatalf("mixed slot bound = %d, want %d", got, max(folder, message))
+		}
+		if got := specificPropertiesSlotBound(request, -1, nil, false, true); got != message {
+			t.Fatalf("message slot bound = %d, want %d", got, message)
+		}
+	}
+}

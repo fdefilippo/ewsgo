@@ -80,8 +80,8 @@ public final class IncomingRulesExtension implements ZimbraExtension, RemovableD
 
     @Override
     public void registerHandlers(DocumentDispatcher dispatcher) {
-        dispatcher.registerHandler(READ, new RulesHandler(false));
-        dispatcher.registerHandler(REPLACE, new RulesHandler(true));
+        dispatcher.registerHandler(READ, new RulesHandler(RulesOperation.READ));
+        dispatcher.registerHandler(REPLACE, new RulesHandler(RulesOperation.REPLACE));
         receiveRouting.register(dispatcher);
         deferredActions.register(dispatcher);
     }
@@ -180,11 +180,13 @@ public final class IncomingRulesExtension implements ZimbraExtension, RemovableD
         return true;
     }
 
-    private static final class RulesHandler extends DocumentHandler {
-        private final boolean replace;
+    private enum RulesOperation { READ, REPLACE }
 
-        RulesHandler(boolean replace) {
-            this.replace = replace;
+    private static final class RulesHandler extends DocumentHandler {
+        private final RulesOperation operation;
+
+        RulesHandler(RulesOperation operation) {
+            this.operation = operation;
         }
 
         @Override
@@ -198,7 +200,7 @@ public final class IncomingRulesExtension implements ZimbraExtension, RemovableD
             ZLdapContext ldap = LdapClient.getContext(LdapServerType.MASTER, LdapUsage.MODIFY_ACCOUNT);
             try {
                 Snapshot current = read(ldap, dn);
-                if (!replace) {
+                if (operation == RulesOperation.READ) {
                     Element response = soap.createElement(QName.get("ReadIncomingRulesResponse", NS));
                     response.addAttribute("revision", current.revision());
                     response.addElement(QName.get("script", NS)).setText(Base64.getEncoder().encodeToString(current.bytes()));

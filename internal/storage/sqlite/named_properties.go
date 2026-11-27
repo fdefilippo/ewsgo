@@ -78,7 +78,7 @@ func (s *Store) namedPropertyIDs(ctx context.Context, mailboxID string, names []
 			return nil, core.ErrInvalid
 		}
 		if key.Set == standardMAPISet {
-			if !key.IsName() && key.ID <= 0xffff {
+			if !key.IsName() && key.ID < 0x8000 {
 				ids[i] = uint16(key.ID)
 			}
 			continue

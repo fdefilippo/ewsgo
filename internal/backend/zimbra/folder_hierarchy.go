@@ -28,10 +28,10 @@ func (m *mailbox) CreateMailFolder(ctx context.Context, placement core.MailFolde
 		return core.Object{}, err
 	}
 	if err = m.mailContentFolder(ctx, parent); err != nil {
-		return core.Object{}, semanticError(err)
+		return core.Object{}, errors.Join(core.ErrWriteNotDispatched, semanticError(err))
 	}
 	folder := attr(attr(attr(attr(element(mailNS, "folder", ""), "name", placement.Name), "l", parent), "view", "message"), "fie", "0")
-	result, err := m.native.request(ctx, mailNS, "CreateFolder", "", element(mailNS, "CreateFolderRequest", "", folder))
+	result, err := m.native.requestMutation(ctx, mailNS, "CreateFolder", "", element(mailNS, "CreateFolderRequest", "", folder))
 	if err != nil {
 		return core.Object{}, folderPlacementError(err)
 	}

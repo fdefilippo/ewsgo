@@ -41,7 +41,7 @@ func (s *hierarchyState) importNewMailFolder(ctx context.Context, box core.Mailb
 			store.mu.Unlock()
 			return core.ErrConflict
 		}
-		if len(store.pendingCreations) >= maxPendingHierarchyCreations || store.mappingCountLocked() >= maxRAMMappings {
+		if len(store.pendingCreations) >= maxPendingHierarchyCreations || store.mappingCountLocked() >= store.mappingLimit() {
 			store.mu.Unlock()
 			return hierarchyImportLimit
 		}
@@ -91,16 +91,20 @@ func (s *hierarchyState) importNewMailFolder(ctx context.Context, box core.Mailb
 		}
 	} else {
 		if err := ctx.Err(); err != nil {
-			store.dropUnboundCreation(ctx, fid)
+			if cleanup := store.dropUnboundCreation(ctx, fid); cleanup != nil {
+				return errors.Join(err, cleanup)
+			}
 			return err
 		}
 		native, err = writer.CreateMailFolder(ctx, placement)
 		if native.ID == "" {
-			if errors.Is(err, core.ErrConflict) {
-				store.dropUnboundCreation(ctx, fid)
+			if folderCreationRejected(err) {
+				if cleanup := store.dropUnboundCreation(ctx, fid); cleanup != nil {
+					return errors.Join(err, cleanup)
+				}
 			}
 			if err == nil {
-				return core.ErrInvalid
+				return core.ErrOutcomeUnknown
 			}
 			return err
 		}
@@ -151,7 +155,15 @@ func (s *hierarchyState) importNewMailFolder(ctx context.Context, box core.Mailb
 	return nil
 }
 
-func (s *ramStore) dropUnboundCreation(ctx context.Context, fid uint64) {
+func folderCreationRejected(err error) bool {
+	return !errors.Is(err, core.ErrOutcomeUnknown) &&
+		(errors.Is(err, core.ErrWriteNotDispatched) || errors.Is(err, core.ErrInvalid) ||
+			errors.Is(err, core.ErrConflict) || errors.Is(err, core.ErrNotFound) ||
+			errors.Is(err, core.ErrAccessDenied) || errors.Is(err, core.ErrAuthentication) ||
+			errors.Is(err, core.ErrUnsupported) || errors.Is(err, core.ErrLimit))
+}
+
+func (s *ramStore) dropUnboundCreation(ctx context.Context, fid uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// The backend was not called or definitively rejected creation. Clear
@@ -160,11 +172,12 @@ func (s *ramStore) dropUnboundCreation(ctx context.Context, fid uint64) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		defer cancel()
 		if err := s.advanceReplicaLocked(ctx, mapireplica.Mutation{ForgetFolderCreation: folderGlobalCount(fid)}); err != nil {
-			return
+			return err
 		}
 	}
 	delete(s.pendingCreations, fid)
 	s.unboundCreations--
+	return nil
 }
 
 // A known SOAP identity can be reserved immediately even when readback
@@ -232,7 +245,7 @@ func (s *ramStore) loadFolderCreations(creations []mapireplica.FolderCreation) e
 			s.unboundCreations++
 		}
 	}
-	if s.mappingCountLocked() > maxRAMMappings {
+	if s.mappingCountLocked() > s.mappingLimit() {
 		return core.ErrLimit
 	}
 	return nil

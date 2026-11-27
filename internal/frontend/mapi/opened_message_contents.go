@@ -58,7 +58,7 @@ func (s *ramStore) readOpenedMailProjection(ctx context.Context, session core.Se
 	if err != nil {
 		return projectedMessage{}, err
 	}
-	projection, err := projectMailContents(object)
+	projection, err := projectReadableMailContents(object)
 	if err != nil {
 		return projectedMessage{}, err
 	}

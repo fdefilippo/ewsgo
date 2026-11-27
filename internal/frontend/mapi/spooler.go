@@ -15,7 +15,7 @@ type transportNewMailRequest struct {
 	flags    uint32
 }
 
-func executeSpooler(ctx context.Context, session core.Session, objects *mailboxObjects, op Operation, handles []uint32) []byte {
+func (t *SessionTransport) executeSpooler(ctx context.Context, session core.Session, objects *mailboxObjects, op Operation, handles []uint32) []byte {
 	reply := func(code uint32) []byte { return ropError(op.ID, op.Input, code) }
 	handle := handles[op.Input]
 	logon, code := objects.logonObject(handle, op.Logon)
@@ -28,6 +28,9 @@ func executeSpooler(ctx context.Context, session core.Session, objects *mailboxO
 	}
 	if op.ID == ropSetSpooler {
 		if err := hierarchyOwner(ctx, session.Mailbox()); err != nil {
+			return reply(storeError(err))
+		}
+		if err := t.recoverSpoolerDispatches(ctx, session, store, 0, 0); err != nil {
 			return reply(storeError(err))
 		}
 		logon.spooler = true

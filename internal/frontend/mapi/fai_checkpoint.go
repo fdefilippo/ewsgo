@@ -23,7 +23,7 @@ type faiStatePermit struct {
 	afterKey, readAfterKey, normalAfterKey [32]byte
 	readBound                              bool
 	created                                []uint64 // Only successfully created MIDs, at most 128.
-	ready, closed                          bool
+	closed                                 bool
 	lease                                  *contentsLease
 }
 
@@ -56,11 +56,28 @@ func (s *ramStore) finishFAIStatePermit(p *faiStatePermit, publish bool) {
 		return
 	}
 	p.closed = true
+	delete(s.faiStatePermits, p)
 	if publish {
-		p.ready = true
+		retainedBytes := 512 + 8*cap(p.created)
+		for _, set := range []idSet{p.before, p.readBefore, p.normalBefore} {
+			retainedBytes += 64 * cap(set.replicas)
+			for _, replica := range set.replicas {
+				retainedBytes += 16 * cap(replica.ranges)
+			}
+		}
+		_ = p.lease.shrink(min(retainedBytes, faiStatePermitMemory))
+		if len(s.faiUploadProofs) == maxFAIStatePermits {
+			s.faiUploadProofs[0].release()
+			copy(s.faiUploadProofs, s.faiUploadProofs[1:])
+			s.faiUploadProofs = s.faiUploadProofs[:maxFAIStatePermits-1]
+		}
+		s.faiUploadProofs = append(s.faiUploadProofs, p)
 		return
 	}
-	delete(s.faiStatePermits, p)
+	p.release()
+}
+
+func (p *faiStatePermit) release() {
 	p.before, p.readBefore, p.normalBefore = idSet{}, idSet{}, idSet{}
 	p.created = nil
 	p.lease.release()
@@ -148,7 +165,7 @@ func (s *ramStore) loadUploadProofs(ctx context.Context, root uint64) ([]*faiSta
 	}
 	accepted := make([]*faiStatePermit, 0, len(proofs))
 	for _, proof := range proofs {
-		p := &faiStatePermit{root: root, afterKey: proof.After, readAfterKey: proof.ReadAfter, created: proof.Created, ready: true}
+		p := &faiStatePermit{root: root, afterKey: proof.After, readAfterKey: proof.ReadAfter, created: proof.Created}
 		p.before, err = parseIDSet(proof.Before)
 		if err == nil && proof.ReadAfter != ([32]byte{}) {
 			p.readBound = true
@@ -213,8 +230,8 @@ func (s *ramStore) validateContentsCheckpointRoot(ctx context.Context, scope [32
 					return false
 				}
 			}
-			for p := range s.faiStatePermits {
-				if p.ready && p.root == root {
+			for _, p := range s.faiUploadProofs {
+				if p.root == root {
 					permits = append(permits, p)
 				}
 			}
@@ -386,11 +403,16 @@ func (c *faiCollector) save(ctx context.Context, session core.Session, draft *fa
 	if err := c.prepareMutation(ctx, session, 1); err != nil {
 		return messageRow{}, err
 	}
-	row, created, err := draft.saveWithCreation(ctx, session, flags)
+	row, created, downloadRequired, err := draft.saveWithCreation(ctx, session, flags)
 	if err != nil {
 		return messageRow{}, err
 	}
-	c.acknowledge([]uint64{row.cn})
+	if downloadRequired {
+		// The client uploaded the losing version and still needs the winner.
+		c.changes++
+	} else {
+		c.acknowledge([]uint64{row.cn})
+	}
 	if created {
 		c.created = append(c.created, folderGlobalCount(row.mid))
 	}

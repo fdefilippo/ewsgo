@@ -10,6 +10,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"time"
 
 	"ewsgo/internal/core"
 	"ewsgo/internal/mapireplica"
@@ -438,7 +439,7 @@ func (s *ramStore) prepareMessageImportEdit(fid uint64, d *mailImportDraft) (mes
 		return messageVersion{}, core.ErrConflict
 	}
 	if s.next == maxGlobalCount || s.messageRegistryBytesLocked()+len(d.history)+len(d.request.change)-
-		len(current.history)-len(current.change) > maxMessageRegistryBytes {
+		len(current.history)-len(current.change) > s.messageRegistryLimit() {
 		return messageVersion{}, core.ErrLimit
 	}
 	return current, nil
@@ -448,7 +449,7 @@ func (s *ramStore) publishMessageImportEdit(ctx context.Context, d *mailImportDr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.messages[d.editKey] != current || s.next == maxGlobalCount || s.messageRegistryBytesLocked()+
-		len(d.history)+len(d.request.change)-len(current.history)-len(current.change) > maxMessageRegistryBytes {
+		len(d.history)+len(d.request.change)-len(current.history)-len(current.change) > s.messageRegistryLimit() {
 		return 0, core.ErrOutcomeUnknown
 	}
 	mid := folderID(d.counter)
@@ -559,8 +560,8 @@ func (s *ramStore) claimMessageImport(ctx context.Context, p mapireplica.Message
 	if s.retiredCounterLocked(p.Counter) {
 		return false, core.ErrConflict
 	}
-	if len(s.pendingMessageImports) >= maxPendingMessageImports || s.mappingCountLocked() >= maxRAMMappings ||
-		s.next > maxGlobalCount-5 || s.messageRegistryBytesLocked()+pendingMessageImportBytes > maxMessageRegistryBytes {
+	if len(s.pendingMessageImports) >= maxPendingMessageImports || s.mappingCountLocked() >= s.mappingLimit() ||
+		s.next > maxGlobalCount-5 || s.messageRegistryBytesLocked()+pendingMessageImportBytes > s.messageRegistryLimit() {
 		return false, core.ErrLimit
 	}
 	if err := s.advanceReplicaLocked(ctx, mapireplica.Mutation{MessageImport: &p, ImportAction: mapireplica.ClaimMessageImport}); err != nil {
@@ -592,11 +593,15 @@ func (s *ramStore) messageImportFailure(ctx context.Context, p mapireplica.Messa
 	if p.NativeID != "" || errors.Is(cause, core.ErrOutcomeUnknown) {
 		return errors.Join(core.ErrOutcomeUnknown, cause)
 	}
-	if !errors.Is(cause, core.ErrInvalid) && !errors.Is(cause, core.ErrConflict) && !errors.Is(cause, core.ErrNotFound) &&
-		!errors.Is(cause, core.ErrAccessDenied) && !errors.Is(cause, core.ErrUnsupported) && !errors.Is(cause, core.ErrLimit) {
+	if !errors.Is(cause, core.ErrWriteNotDispatched) && !errors.Is(cause, core.ErrInvalid) &&
+		!errors.Is(cause, core.ErrConflict) && !errors.Is(cause, core.ErrNotFound) &&
+		!errors.Is(cause, core.ErrAccessDenied) && !errors.Is(cause, core.ErrAuthentication) &&
+		!errors.Is(cause, core.ErrUnsupported) && !errors.Is(cause, core.ErrLimit) {
 		return errors.Join(core.ErrOutcomeUnknown, cause)
 	}
-	if err := s.updateMessageImport(ctx, p, mapireplica.CancelMessageImport); err != nil {
+	commit, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	if err := s.updateMessageImport(commit, p, mapireplica.CancelMessageImport); err != nil {
 		return errors.Join(core.ErrOutcomeUnknown, err)
 	}
 	return cause
@@ -660,7 +665,7 @@ func (s *ramStore) pendingImportedMessage(fid uint64, o core.Object) bool {
 		if p.NativeID == o.ID {
 			return true
 		}
-		if p.NativeID != "" {
+		if p.NativeID != "" || len(o.MIME) == 0 {
 			continue
 		}
 		if digest == ([32]byte{}) {
@@ -671,4 +676,46 @@ func (s *ramStore) pendingImportedMessage(fid uint64, o core.Object) bool {
 		}
 	}
 	return false
+}
+
+// A pending append without an ID requires MIME only for as yet unmapped
+// index rows. An unreadable candidate is withheld individually.
+func (s *ramStore) filterIndexedImportCandidates(ctx context.Context, reader core.MailMessageMIMEReader, fid uint64, folder core.ID, objects []core.Object) ([]core.Object, error) {
+	if reader == nil {
+		return objects, nil // A backend without a MIME reader uses the full view.
+	}
+	s.mu.Lock()
+	digests := make(map[[32]byte]bool)
+	for _, p := range s.pendingMessageImports {
+		if p.Special() == 0 && folderID(p.Parent) == fid && p.NativeID == "" {
+			digests[p.MIME] = true
+		}
+	}
+	if len(digests) == 0 {
+		s.mu.Unlock()
+		return objects, nil
+	}
+	unmapped := make(map[core.ID]bool)
+	for _, object := range objects {
+		if s.byMessage[messageKey{id: object.ID}] == 0 {
+			unmapped[object.ID] = true
+		}
+	}
+	s.mu.Unlock()
+	visible := make([]core.Object, 0, len(objects))
+	for _, object := range objects {
+		if unmapped[object.ID] {
+			full, err := reader.ReadMailMessageMIME(ctx, folder, object.ID, false)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			contentRevision, versioned := full.Properties[core.ContentRevision].(core.Integer)
+			if err != nil || full.ID != object.ID || full.Parent != folder || full.Kind != core.Message || !versioned ||
+				object.Properties[core.ContentRevision] != contentRevision || len(full.MIME) == 0 || digests[sha256.Sum256(full.MIME)] {
+				continue
+			}
+		}
+		visible = append(visible, object)
+	}
+	return visible, nil
 }

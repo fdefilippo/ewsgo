@@ -150,9 +150,8 @@ func (s *namedPropertyRegistry) ids(ctx context.Context, names []propertyName, c
 	ids := make([]uint16, len(keys))
 	for i, key := range keys {
 		if key.Set == psMAPI {
-			// Numeric PS_MAPI IDs are direct, not registrations. An LID
-			// that cannot fit in the 16-bit response is not mapped.
-			if key.Kind == 0 && key.LID <= 0xffff {
+			// Numeric PS_MAPI IDs occupy the low half of the wire ID space.
+			if key.Kind == 0 && key.LID < 0x8000 {
 				ids[i] = uint16(key.LID)
 			}
 			continue

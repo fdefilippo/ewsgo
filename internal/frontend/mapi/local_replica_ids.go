@@ -229,7 +229,7 @@ func (s *ramStore) reserveLocalIDs(ctx context.Context, count uint32) ([6]byte, 
 	if !merge {
 		budget += 16
 	}
-	if budget > maxMessageRegistryBytes {
+	if budget > s.messageRegistryLimit() {
 		return [6]byte{}, 0x8007000e
 	}
 	if s.durable.store != nil {

@@ -118,6 +118,11 @@ func completeMAPIMessageMove(ctx context.Context, tx *sql.Tx, mailbox string, pr
 	if err := mapiMoveResult(result, err, "retire MAPI message binding"); err != nil {
 		return err
 	}
+	// A submission is scoped to the original draft revision and counter.
+	// The independent send registry retains its outcome.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mapi_spooler WHERE mailbox_id = ? AND counter = ?`, mailbox, move.Source); err != nil {
+		return fmt.Errorf("retire MAPI spooler entry: %w", err)
+	}
 	return insertMAPIObjectIDs(ctx, tx, mailbox, []MAPIObjectID{{Namespace: MAPIMessage, Key: nativeKey, Counter: move.Destination}})
 }
 

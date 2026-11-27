@@ -224,3 +224,55 @@ func TestReplicaConversionPreflightAndAuthorizationAreAtomic(t *testing.T) {
 		})
 	}
 }
+
+type foreignReplicaTestSession struct{ core.Session }
+
+func (foreignReplicaTestSession) Identity() core.Identity {
+	return core.Identity{Scope: core.Scope{Backend: "fixture", Account: "another-mailbox"}}
+}
+
+func TestReplicaConversionStoresOnlyTranslationInAuthorizedMailbox(t *testing.T) {
+	f, _ := newCalendarFixture(t)
+	open := sqliteExecuteFixture(t, f)
+	db := open()
+	s := replicaStore(t, f)
+	ctx := t.Context()
+	before, err := db.LoadMAPIReplica(ctx, s.durable.mailbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var long [24]byte
+	long[0] = 7
+	copy(long[16:22], binary.LittleEndian.AppendUint64(nil, f.fids[Inbox])[2:])
+	op := Operation{ID: 0x44, Logon: 4, Input: 0, LongTermID: long}
+	out := convertFolderID(ctx, foreignReplicaTestSession{f.session}, f.state.mailbox, op, f.handles)
+	if !bytes.Equal(out, ropError(0x44, 0, accessDenied)) {
+		t.Fatalf("foreign mailbox conversion result %x", out)
+	}
+	after, err := db.LoadMAPIReplica(ctx, s.durable.mailbox)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("denied request changed durable state: %v", err)
+	}
+	wire := conversionOperation(0x44, long[:])
+	reply := faiRunOK(t, f, wire)
+	if len(reply) != 14 || binary.LittleEndian.Uint16(reply[6:8]) != 2 {
+		t.Fatalf("foreign translation result %x", reply)
+	}
+	id := binary.LittleEndian.Uint64(reply[6:])
+	if out, _ := f.run(folderOperation(id, 4, 0, 1)); !bytes.Equal(out, ropError(2, 1, PropertyNotFound)) {
+		t.Fatalf("foreign translation resolved a live local folder: %x", out)
+	}
+	after, err = db.LoadMAPIReplica(ctx, s.durable.mailbox)
+	if err != nil || after.Version.Epoch != before.Version.Epoch ||
+		after.Version.HighWater != before.Version.HighWater+1 || !reflect.DeepEqual(after.Bindings, before.Bindings) ||
+		len(after.ForeignReplicas) != 1 || after.ForeignReplicas[0] != ([16]byte{7}) {
+		t.Fatalf("translation did not isolate replica and object tables: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	open()
+	if repeated := faiRunOK(t, f, wire); !bytes.Equal(repeated, reply) {
+		t.Fatal("foreign REPLID changed after restart")
+	}
+}

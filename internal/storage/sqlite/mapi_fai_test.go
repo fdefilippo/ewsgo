@@ -59,7 +59,7 @@ func TestMAPIFAIPersistsTypedValuesAndTombstonesAtomically(t *testing.T) {
 	}); !errors.Is(err, core.ErrConflict) {
 		t.Fatalf("duplicate source committed: %v", err)
 	}
-	tooMany := make([]MAPIFAITombstone, maxMAPIFAIObjects)
+	tooMany := make([]MAPIFAITombstone, maxMAPIFAIObjects+1)
 	for i := range tooMany {
 		tooMany[i] = MAPIFAITombstone{Source: [22]byte{0x56, byte(i + 1)}, Folder: 1}
 	}

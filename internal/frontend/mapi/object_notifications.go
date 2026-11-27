@@ -355,7 +355,7 @@ func (s *ramStore) projectObjectNotification(ctx context.Context, event Notifica
 			if !allocate {
 				return 1, true
 			}
-			if s.mappingCountLocked() >= maxRAMMappings || s.next >= maxGlobalCount {
+			if s.mappingCountLocked() >= s.mappingLimit() || s.next >= maxGlobalCount {
 				allocationErr = core.ErrLimit
 				return 0, false
 			}
@@ -469,7 +469,7 @@ func (s *ramStore) nativeMessageMIDLocked(ctx context.Context, id core.ID, alloc
 		return 1, nil
 	}
 	budget := 192 + len(id) + s.messageRegistryBytesLocked()
-	if s.mappingCountLocked() >= maxRAMMappings || s.next >= maxGlobalCount || budget > maxMessageRegistryBytes {
+	if s.mappingCountLocked() >= s.mappingLimit() || s.next >= maxGlobalCount || budget > s.messageRegistryLimit() {
 		return 0, core.ErrLimit
 	}
 	next := s.next + 1

@@ -17,17 +17,17 @@ import (
 // Backup copies a consistent snapshot of a store, including commits in WAL,
 // to a new file. The source can remain in use and is opened read-only.
 func Backup(ctx context.Context, source, destination string) error {
-	return copyStore(ctx, source, destination, false)
+	return copyStore(ctx, source, destination, nil)
 }
 
 // Restore copies a backup to a new file and invalidates pre-restore journal
 // cursors while preserving mailbox and replica identities. Restored ready
 // sends cannot be dispatched because a newer copy may already have sent them.
 func Restore(ctx context.Context, backup, destination string) error {
-	return copyStore(ctx, backup, destination, true)
+	return copyStore(ctx, backup, destination, prepareRestoredDatabase)
 }
 
-func copyStore(ctx context.Context, source, destination string, restore bool) error {
+func copyStore(ctx context.Context, source, destination string, prepare func(context.Context, string) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -62,8 +62,8 @@ func copyStore(ctx context.Context, source, destination string, restore bool) er
 	if err := snapshotDatabase(ctx, source, staged); err != nil {
 		return err
 	}
-	if restore {
-		if err := prepareRestoredDatabase(ctx, staged); err != nil {
+	if prepare != nil {
+		if err := prepare(ctx, staged); err != nil {
 			return err
 		}
 	}
@@ -139,6 +139,9 @@ func prepareRestoredDatabase(ctx context.Context, staged string) (result error) 
 			result = fmt.Errorf("close staged restore: %w", err)
 		}
 	}()
+	if err := verifyRestoredDatabase(ctx, db); err != nil {
+		return fmt.Errorf("check snapshot before migration: %w", err)
+	}
 	var journalMode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode = DELETE").Scan(&journalMode); err != nil {
 		return fmt.Errorf("set standalone restore journal mode: %w", err)

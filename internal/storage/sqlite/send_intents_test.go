@@ -12,6 +12,57 @@ import (
 	"ewsgo/internal/core"
 )
 
+func TestCorrelatedSendRetentionAcrossJournalMaintenanceAndRestart(t *testing.T) {
+	for _, state := range []core.SendState{core.SendConfirmed, core.SendUncertain} {
+		name := "confirmed"
+		if state == core.SendUncertain {
+			name = "uncertain"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "retention.sqlite")
+			store, mailbox := openJournalFixture(t, path)
+			input := core.SendInput{MIMEDigest: sha256.Sum256([]byte("original MIME"))}
+			key := sha256.Sum256([]byte("message-id"))
+			intent, err := store.PrepareCorrelatedSend(ctx, mailbox, input, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, won, err := store.ClaimSend(ctx, mailbox, intent.ID, input); err != nil || !won {
+				t.Fatalf("claim: %t, %v", won, err)
+			}
+			var sent core.ID
+			if state == core.SendConfirmed {
+				sent = "sent-copy"
+				if err := store.CompleteSend(ctx, mailbox, intent.ID, state, sent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.db.ExecContext(ctx, "UPDATE mailboxes SET journal_revision = ? WHERE mailbox_id = ?", journalRetainedRevisions+1, mailbox); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.MaintainJournal(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, _ = openJournalFixture(t, path)
+			replay, err := store.PrepareCorrelatedSend(ctx, mailbox, input, key)
+			if err != nil || replay.ID != intent.ID || replay.State != state || replay.SentID != sent {
+				t.Fatalf("replay lost receipt: %+v, %v", replay, err)
+			}
+			if _, won, err := store.ClaimSend(ctx, mailbox, replay.ID, input); err != nil || won {
+				t.Fatalf("replay claimed another dispatch: %t, %v", won, err)
+			}
+			input.MIMEDigest = sha256.Sum256([]byte("different MIME"))
+			if _, err := store.PrepareCorrelatedSend(ctx, mailbox, input, key); !errors.Is(err, core.ErrConflict) {
+				t.Fatalf("replay with different MIME: %v", err)
+			}
+		})
+	}
+}
+
 func TestSendIntentClaimSurvivesRetryAndRestore(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()

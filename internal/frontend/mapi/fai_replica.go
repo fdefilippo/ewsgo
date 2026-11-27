@@ -73,21 +73,24 @@ func (s *ramStore) loadFAIReplica(state mapireplica.FAIState, projections []mapi
 	for _, tombstone := range state.Tombstones {
 		absent[tombstone.Source] = folderID(tombstone.Folder)
 	}
-	total, err := s.validateAbsentFAI(records, absent)
+	total, err := s.validateFAIHistory(records, absent)
 	if err != nil {
 		return err
 	}
+	activeBytes := 0
 	for _, record := range records {
-		total += record.bytes
+		if !record.deleted {
+			activeBytes += record.bytes
+		}
 	}
-	if total > maxFAIStoreBytes {
+	if activeFAICount(records) > maxFAIObjects || activeBytes > maxFAIStoreBytes {
 		return core.ErrUnsupported
 	}
-	lease, err := s.reserveContentsMemory(total)
+	lease, err := s.reserveContentsMemory(total + activeBytes)
 	if err != nil {
 		return err
 	}
-	s.fai = faiNamespace{records: records, absent: absent, bytes: total, lease: lease}
+	s.fai = faiNamespace{records: records, absent: absent, bytes: total + activeBytes, lease: lease}
 	return nil
 }
 

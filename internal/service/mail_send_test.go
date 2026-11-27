@@ -52,7 +52,9 @@ func TestMailSenderAcrossFailuresAndRestart(t *testing.T) {
 	}{
 		{name: "retry before dispatch", wantState: core.SendConfirmed},
 		{name: "client cancels after acceptance", cancel: true, wantState: core.SendConfirmed},
+		{name: "not dispatched after claim", sendErr: core.ErrSendRetryable, cancel: true, wantState: core.SendReady, wantErr: core.ErrSendRetryable},
 		{name: "rejected before acceptance", sendErr: core.ErrSendRejected, wantState: core.SendFailed, wantErr: core.ErrSendRejected},
+		{name: "deadline after dispatch", sendErr: context.DeadlineExceeded, wantState: core.SendUncertain, wantErr: core.ErrOutcomeUnknown},
 		{name: "accepted but response lost", sendErr: responseErr, wantState: core.SendUncertain, wantErr: core.ErrOutcomeUnknown},
 		{name: "accepted but local commit lost", failStore: true, wantState: core.SendUncertain, wantErr: core.ErrOutcomeUnknown},
 	} {
@@ -81,8 +83,14 @@ func TestMailSenderAcrossFailuresAndRestart(t *testing.T) {
 								t.Fatal(err)
 							}
 						}
-						if tc.cancel {
+						if tc.cancel && dispatched == 1 {
 							cancel()
+						}
+						if dispatched == 2 && tc.wantState == core.SendReady {
+							return "m:42", nil
+						}
+						if tc.sendErr != nil {
+							return "", tc.sendErr
 						}
 						return "m:42", tc.sendErr
 					}, nil
@@ -130,7 +138,11 @@ func TestMailSenderAcrossFailuresAndRestart(t *testing.T) {
 				t.Fatalf("confirmed receipt lost: %+v", got)
 			}
 			got, err = sender.Submit(ctx, account, intent.ID, mime)
-			if !errors.Is(err, tc.wantErr) || got.State != tc.wantState || staged != 2 || dispatched != 1 {
+			if tc.wantState == core.SendReady {
+				if err != nil || got.State != core.SendConfirmed || got.SentID != "m:42" || staged != 3 || dispatched != 2 {
+					t.Fatalf("safe retry: %+v, %v, staged %d, attempts %d", got, err, staged, dispatched)
+				}
+			} else if !errors.Is(err, tc.wantErr) || got.State != tc.wantState || staged != 2 || dispatched != 1 {
 				t.Fatalf("retry: %+v, %v, staged %d, dispatched %d", got, err, staged, dispatched)
 			}
 			if _, err := sender.Submit(ctx, account, intent.ID, []byte("different MIME")); !errors.Is(err, core.ErrConflict) {
@@ -142,6 +154,41 @@ func TestMailSenderAcrossFailuresAndRestart(t *testing.T) {
 				t.Fatalf("foreign mailbox status: %v", err)
 			}
 		})
+	}
+}
+
+func TestMailSenderDraftRecoveryProtectsRevision(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "mail.sqlite")
+	store, err := sqlite.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := sendTestSession{
+		identity: core.Identity{Scope: core.Scope{Backend: "fixture", Account: "self"}, Name: "self@example.invalid"},
+		backend: &sendTestMailbox{stage: func(context.Context, core.SendIntent, []byte) (core.SendAttempt, error) {
+			t.Fatal("a held draft revision reached staging")
+			return nil, core.ErrUnsupported
+		}},
+	}
+	draft := core.Object{ID: "m:5", Revision: 3, Kind: core.Message, Properties: core.Properties{core.IsDraft: core.Bool(true)},
+		MIME: []byte("From: self@example.invalid\r\nTo: other@example.invalid\r\n\r\nFixture\r\n"),
+	}
+	sender := NewMailSender(store, "primary")
+	if state, err := sender.RecoverDraftSend(ctx, account, draft.ID, draft.Revision); err != nil || state != core.SendUncertain {
+		t.Fatalf("hold: state=%v, err=%v", state, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := sqlite.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	sender = NewMailSender(reopened, "primary")
+	if _, err := sender.SendDraft(ctx, account, draft); !errors.Is(err, core.ErrOutcomeUnknown) {
+		t.Fatalf("held draft replay: %v", err)
 	}
 }
 

@@ -5,6 +5,7 @@ package mapi
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
@@ -25,6 +26,56 @@ func projectSyntheticMail(t *testing.T, raw string) projectedMessage {
 }
 func projectionValue(values contentsValues, tag uint32) core.Value {
 	return values[fixedContentsProperty(tag)]
+}
+
+func TestMailProjectionMessageFlags(t *testing.T) {
+	const flagsTag = 0x0e070003
+	for _, tc := range []struct {
+		name              string
+		draft, attachment bool
+		want              uint32
+	}{
+		{name: "received", want: 1},
+		{name: "draft", draft: true, want: 9},
+		{name: "draft with attachment", draft: true, attachment: true, want: 25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "Subject: fixture\r\n\r\nMessage\r\n"
+			if tc.attachment {
+				raw = "Content-Type: multipart/mixed; boundary=m\r\n\r\n" +
+					"--m\r\nContent-Type: text/plain\r\n\r\nMessage\r\n" +
+					"--m\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=fixture.bin\r\n\r\ndata\r\n--m--\r\n"
+			}
+			row := messageRow{object: core.Object{
+				Kind: core.Message,
+				MIME: []byte(raw),
+				Properties: core.Properties{
+					core.IsRead:         core.Bool(true),
+					core.IsDraft:        core.Bool(tc.draft),
+					core.HasAttachments: core.Bool(tc.attachment),
+					core.MessageSize:    core.Integer(len(raw)),
+				},
+			}}
+			indexed, err := indexedContentsPayload(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projected, err := projectMailContents(row.object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := projectionValue(indexed.values, flagsTag); got != core.Integer(tc.want) {
+				t.Fatalf("indexed flags = %v, want %d", got, tc.want)
+			}
+			if got := projectionValue(projected.values, flagsTag); got != core.Integer(tc.want) {
+				t.Fatalf("MIME projection flags = %v, want %d", got, tc.want)
+			}
+			opened := openedMessageProperty(row, storeBinding{store: &ramStore{}}, flagsTag, true, 1252, false, 0)
+			if len(opened.data) != 4 || binary.LittleEndian.Uint32(opened.data) != tc.want {
+				t.Fatalf("opened-message flags = %x, want %d", opened.data, tc.want)
+			}
+		})
+	}
 }
 
 func TestMailProjectionFollowUpProperties(t *testing.T) {

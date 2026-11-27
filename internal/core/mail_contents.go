@@ -59,6 +59,8 @@ type MailFolderMarker struct {
 	Sequence     uint64
 	Children     [32]byte
 	MessageCount uint64
+	// UntypedCount means MessageCount includes native items outside this projection.
+	UntypedCount bool
 }
 
 type MailFolderObservation struct {
@@ -66,6 +68,8 @@ type MailFolderObservation struct {
 	Children     [32]byte
 	MessageCount uint64
 	MessageIDs   []ID
+	// CountOmitted is valid only when Sequence matches the supplied priorSequence.
+	CountOmitted bool
 }
 
 func (MailFolderObservation) String() string   { return "MailFolderObservation{private}" }

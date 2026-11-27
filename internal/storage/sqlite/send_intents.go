@@ -18,21 +18,32 @@ import (
 // PrepareSend records a fresh intentional send and returns its own receipt.
 // A retry of a submission must use the original receipt.
 func (s *Store) PrepareSend(ctx context.Context, mailboxID string, input core.SendInput) (core.SendIntent, error) {
-	return s.prepareSend(ctx, mailboxID, input, nil)
+	return s.prepareSend(ctx, mailboxID, input, nil, core.SendReady)
 }
 
 // PrepareCorrelatedSend reuses the receipt for a message key in the current
 // mailbox, provided that the caller supplied the original message bytes.
 func (s *Store) PrepareCorrelatedSend(ctx context.Context, mailboxID string, input core.SendInput, key [32]byte) (core.SendIntent, error) {
-	return s.prepareSend(ctx, mailboxID, input, key[:])
+	return s.prepareSend(ctx, mailboxID, input, key[:], core.SendReady)
 }
 
-func (s *Store) prepareSend(ctx context.Context, mailboxID string, input core.SendInput, key []byte) (core.SendIntent, error) {
+// RecoverCorrelatedDraftSend reads an existing outcome. If the spooler was
+// interrupted and its receipt is missing, it records an uncertainty hold for
+// that exact revision. A restored snapshot can be missing a later dispatch.
+func (s *Store) RecoverCorrelatedDraftSend(ctx context.Context, mailboxID string, draft core.ID, revision core.Revision, key [32]byte) (core.SendState, error) {
+	if draft == "" || revision == 0 {
+		return 0, core.ErrInvalid
+	}
+	intent, err := s.prepareSend(ctx, mailboxID, core.SendInput{DraftID: draft, Revision: revision}, key[:], core.SendUncertain)
+	return intent.State, err
+}
+
+func (s *Store) prepareSend(ctx context.Context, mailboxID string, input core.SendInput, key []byte, initial core.SendState) (core.SendIntent, error) {
 	if mailboxID == "" || (input.DraftID == "") != (input.Revision == 0) ||
 		input.Revision > math.MaxInt64 || len(input.DraftID) > 1024 || strings.ContainsRune(string(input.DraftID), 0) {
 		return core.SendIntent{}, core.ErrInvalid
 	}
-	intent := core.SendIntent{ID: strings.ToLower(rand.Text()), Input: input, State: core.SendReady}
+	intent := core.SendIntent{ID: strings.ToLower(rand.Text()), Input: input, State: initial}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO send_intents (mailbox_id, intent_id, mime_digest, draft_id, draft_revision, state, request_key)
 		SELECT mailbox_id, ?, ?, ?, ?, ?, ? FROM mailboxes WHERE mailbox_id = ?
@@ -60,10 +71,19 @@ func (s *Store) prepareSend(ctx context.Context, mailboxID string, input core.Se
 		return core.SendIntent{}, fmt.Errorf("read correlated send receipt: %w", err)
 	}
 	intent, err = readSendIntent(ctx, s.db, mailboxID, id)
-	if err == nil && intent.Input != input {
+	if err != nil {
+		return intent, err
+	}
+	if intent.Input.DraftID != input.DraftID || intent.Input.Revision != input.Revision {
 		return core.SendIntent{}, core.ErrConflict
 	}
-	return intent, err
+	if initial == core.SendReady && intent.Input != input {
+		if input.DraftID != "" && intent.State == core.SendUncertain && intent.Input.MIMEDigest == ([32]byte{}) {
+			return intent, core.ErrOutcomeUnknown
+		}
+		return core.SendIntent{}, core.ErrConflict
+	}
+	return intent, nil
 }
 
 func (s *Store) SendIntent(ctx context.Context, mailboxID, id string) (core.SendIntent, error) {
@@ -128,10 +148,11 @@ func (s *Store) ClaimSend(ctx context.Context, mailboxID, id string, input core.
 }
 
 // CompleteSend records definitive evidence held by the submitting caller.
+// Ready requires proof that there was no acceptance and another attempt is safe.
 func (s *Store) CompleteSend(ctx context.Context, mailboxID, id string, state core.SendState, sentID core.ID) error {
 	if !core.ValidSendIntentID(id) || mailboxID == "" ||
-		state != core.SendConfirmed && state != core.SendFailed ||
-		state == core.SendFailed && sentID != "" || len(sentID) > 1024 || strings.ContainsRune(string(sentID), 0) {
+		state != core.SendConfirmed && state != core.SendFailed && state != core.SendReady ||
+		state != core.SendConfirmed && sentID != "" || len(sentID) > 1024 || strings.ContainsRune(string(sentID), 0) {
 		return core.ErrInvalid
 	}
 	result, err := s.db.ExecContext(ctx, `

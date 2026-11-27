@@ -158,3 +158,64 @@ func TestMailboxWakeupsFallbackAndBoundedFanout(t *testing.T) {
 		receiveHint(t, ctx, first, true) // Wakeup from the recovered native feed.
 	})
 }
+
+func TestMailboxWakeupsOwnerCancellationIsIsolated(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	hub := newMailboxWakeups()
+	ownerContext, disconnect := context.WithCancel(ctx)
+	defer disconnect()
+	sourceA := &testWatchSource{hints: make(chan error, 1)}
+	replacementA := &testWatchSource{hints: make(chan error, 1)}
+	sourceB := &testWatchSource{hints: make(chan error, 1)}
+	scopeA := core.Scope{Backend: "fixture", Account: "a"}
+	scopeB := core.Scope{Backend: "fixture", Account: "b"}
+	watch := func(ctx context.Context, scope core.Scope, source *testWatchSource) (<-chan struct{}, func()) {
+		t.Helper()
+		hints, stop, err := hub.WatchMailbox(ctx, watchSession{scope: scope, source: source})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(stop)
+		return hints, stop
+	}
+	firstA, stopFirst := watch(ownerContext, scopeA, sourceA)
+	secondA, _ := watch(ctx, scopeA, replacementA)
+	firstB, stopB := watch(ctx, scopeB, sourceB)
+	secondB, _ := watch(ctx, scopeB, sourceB)
+
+	start := time.Now()
+	sourceB.hints <- nil
+	receiveHint(t, ctx, firstB, true)
+	receiveHint(t, ctx, secondB, true)
+	sourceA.hints <- nil
+	receiveHint(t, ctx, firstA, true)
+	receiveHint(t, ctx, secondA, true)
+	fanout := time.Since(start)
+	if sourceA.opens.Load() != 1 || sourceB.opens.Load() != 1 || replacementA.opens.Load() != 0 {
+		t.Fatal("two mailbox scopes did not use one native registration each")
+	}
+
+	start = time.Now()
+	disconnect()
+	receiveHint(t, ctx, secondA, false)
+	stopFirst()
+	if sourceA.active.Load() != 0 || replacementA.active.Load() != 0 {
+		t.Fatal("old native watch survived owner request")
+	}
+	sourceB.hints <- nil
+	receiveHint(t, ctx, firstB, true)
+	receiveHint(t, ctx, secondB, true)
+	rejoined, stopA := watch(ctx, scopeA, replacementA)
+	replacementA.hints <- nil
+	receiveHint(t, ctx, rejoined, true)
+	t.Logf("two-scope fanout %v, owner cancel and peer rejoin %v", fanout, time.Since(start))
+	stopA()
+	stopB()
+	receiveHint(t, ctx, rejoined, false)
+	receiveHint(t, ctx, secondB, false)
+	if sourceA.opens.Load() != 1 || sourceB.opens.Load() != 1 || replacementA.opens.Load() != 1 ||
+		sourceA.active.Load()+sourceB.active.Load()+replacementA.active.Load() != 0 {
+		t.Fatal("unexpected native reopen or retained watch")
+	}
+}

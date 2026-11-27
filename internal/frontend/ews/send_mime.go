@@ -49,6 +49,8 @@ func (h *Handler) sendMIMEItems(ctx context.Context, op node, session core.Sessi
 		switch {
 		case err == nil:
 			reply = success(operation)
+		case errors.Is(err, core.ErrSendRetryable):
+			reply = failure(operation, "ErrorServerBusy")
 		case errors.Is(err, core.ErrSendRejected):
 			reply = failure(operation, "ErrorMessageSubmissionBlocked")
 		case errors.Is(err, core.ErrLimit):

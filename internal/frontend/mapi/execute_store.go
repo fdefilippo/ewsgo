@@ -135,12 +135,15 @@ func (t *SessionTransport) executeStore(ctx context.Context, session core.Sessio
 		}
 	}
 	needed := 10 + 4*len(buffer.Handles)
-	var messageSlots, attachmentSlots [MaxHandles]bool
+	var folderSlots, messageSlots, attachmentSlots [MaxHandles]bool
 	for i, handle := range buffer.Handles {
 		object := state.mailbox.objects[handle]
 		messageSlots[i] = object.message != nil || object.download != nil && object.download.mailImport != nil
 		attachmentSlots[i] = object.attachment != nil
+		folderSlots[i] = object.isLogon || object.fid != 0 && object.download == nil && !messageSlots[i] && !attachmentSlots[i]
 	}
+	// A new output can share a slot with an existing handle. On failure that
+	// handle can still serve the next operation, so keep all possible types.
 	for i, op := range ops {
 		switch op.ID {
 		case 0x03:
@@ -257,10 +260,13 @@ func (t *SessionTransport) executeStore(ctx context.Context, session core.Sessio
 			needed += 9
 		case 0xfe:
 			needed += 166
+			folderSlots[op.Output] = true
 		case 0x1c:
 			needed += 15 // Private-store CreateFolder, IsExistingFolder always zero.
+			folderSlots[op.Output] = true
 		case 2:
 			needed += 8
+			folderSlots[op.Output] = true
 		case ropSetProperties, ropSetPropertiesNoReplicate:
 			if op.FAISet != nil {
 				needed += 8 + 10*len(op.FAISet)
@@ -326,11 +332,12 @@ func (t *SessionTransport) executeStore(ctx context.Context, session core.Sessio
 				needed += 15 + len(explicit) // FID, matched class, and NUL.
 			}
 		case 0x07:
-			bound := specificPropertiesObjectBound(*op.Properties, ost.bound(), metadata, messageSlots[op.Input])
+			bound := specificPropertiesSlotBound(*op.Properties, ost.bound(), metadata, folderSlots[op.Input], messageSlots[op.Input])
 			needed += bound
 			if attachmentSlots[op.Input] {
 				ops[i].AttachmentLimit = bound
-			} else if messageSlots[op.Input] {
+			}
+			if messageSlots[op.Input] {
 				for _, tag := range op.Properties.tags {
 					if variableMessageProperty(tag) || t.contactsMetadataSpike && contactVariableProperty(tag) ||
 						t.calendarMetadataSpike && calendarVariableProperty(tag) {
@@ -378,9 +385,17 @@ func (t *SessionTransport) executeStore(ctx context.Context, session core.Sessio
 			needed += limit
 			variableResponses--
 		}
-		if properties := ops[i].Properties; properties != nil && properties.hasVariableMessage {
-			properties.variableBudget = (min(maximumROPBuffer, int(request.MaxOutput)) - needed) / variableResponses
-			needed += properties.variableBudget
+		properties := ops[i].Properties
+		variableMessage := properties != nil && properties.hasVariableMessage
+		if ops[i].AttachmentLimit != 0 || variableMessage {
+			limit := (min(maximumROPBuffer, int(request.MaxOutput)) - needed) / variableResponses
+			if variableMessage {
+				properties.variableBudget = limit
+			}
+			if ops[i].AttachmentLimit != 0 {
+				ops[i].AttachmentLimit += limit
+			}
+			needed += limit
 			variableResponses--
 		}
 		if ops[i].requestsSearchDetails() {
@@ -404,12 +419,6 @@ func (t *SessionTransport) executeStore(ctx context.Context, session core.Sessio
 		if ops[i].ID == 0x0f {
 			limit := (min(maximumROPBuffer, int(request.MaxOutput)) - needed) / variableResponses
 			ops[i].ReadRecipients.limit = readRecipientsMinimum + limit
-			needed += limit
-			variableResponses--
-		}
-		if ops[i].AttachmentLimit != 0 {
-			limit := (min(maximumROPBuffer, int(request.MaxOutput)) - needed) / variableResponses
-			ops[i].AttachmentLimit += limit
 			needed += limit
 			variableResponses--
 		}
@@ -746,7 +755,7 @@ func (t *SessionTransport) executeStore(ctx context.Context, session core.Sessio
 				counts.errors++
 			}
 		case ropSetSpooler, ropTransportNewMail:
-			response = executeSpooler(ctx, session, state.mailbox, op, buffer.Handles)
+			response = t.executeSpooler(ctx, session, state.mailbox, op, buffer.Handles)
 			if binary.LittleEndian.Uint32(response[2:]) != 0 {
 				counts.errors++
 			}
@@ -995,11 +1004,11 @@ func (t *SessionTransport) executeStore(ctx context.Context, session core.Sessio
 	buffer.Operations = responses
 	rop, err := buffer.Marshal()
 	if err != nil {
-		panic("MAPI response exceeded validated size")
+		return Failure(0x0000047d), counts
 	}
 	body, err := ExecuteResponse(0, rop, nil, request.MaxOutput)
 	if err != nil {
-		panic("MAPI response exceeded reserved output")
+		return Failure(0x0000047d), counts
 	}
 	return body, counts
 }
@@ -1102,6 +1111,12 @@ func (t *SessionTransport) privateLogon(ctx context.Context, session core.Sessio
 	if err != nil {
 		return fail(storeError(err))
 	}
+	added := false
+	defer func() {
+		if !added {
+			binding.releasePin()
+		}
+	}()
 	// This is the same mailbox identity advertised by Autodiscover, distinct
 	// from the address-book object GUID and the RAM replica epoch.
 	guid, err := mailboxGUIDWire(identity.GUID)
@@ -1128,6 +1143,7 @@ func (t *SessionTransport) privateLogon(ctx context.Context, session core.Sessio
 	if err != nil {
 		return fail(storeError(err))
 	}
+	added = true
 	handles[op.Output] = handle
 	return response
 }

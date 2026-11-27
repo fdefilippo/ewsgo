@@ -181,7 +181,10 @@ func (s *ramStore) importMessageMove(ctx context.Context, session core.Session, 
 		return mapireplica.MessageMove{}, core.ErrUnsupported
 	}
 	if intent.Source == 0 {
-		if current.Parent != fromFolder.native || current.Revision != version.nativeRevision {
+		if current.Parent != fromFolder.native {
+			return mapireplica.MessageMove{}, core.ErrNotFound
+		}
+		if current.Revision != version.nativeRevision {
 			return mapireplica.MessageMove{}, core.ErrConflict
 		}
 		intent = mapireplica.MessageMove{
@@ -273,8 +276,8 @@ func (s *ramStore) stageMessageMove(ctx context.Context, mid uint64, move mapire
 	if s.retiredCounterLocked(move.Destination) {
 		return core.ErrConflict
 	}
-	if s.mappingCountLocked() >= maxRAMMappings || s.next > maxGlobalCount-4 ||
-		s.messageRegistryBytesLocked()+160+len(move.NativeID)+pendingMessageMoveBytes > maxMessageRegistryBytes {
+	if s.mappingCountLocked() >= s.mappingLimit() || s.next > maxGlobalCount-4 ||
+		s.messageRegistryBytesLocked()+160+len(move.NativeID)+pendingMessageMoveBytes > s.messageRegistryLimit() {
 		return core.ErrLimit
 	}
 	if err := s.advanceReplicaLocked(ctx, mapireplica.Mutation{MessageMove: &move}); err != nil {
@@ -355,6 +358,7 @@ func (s *ramStore) finishMessageMove(ctx context.Context, intent mapireplica.Mes
 	}); err != nil {
 		return 0, errors.Join(core.ErrOutcomeUnknown, err)
 	}
+	delete(s.spoolerQueue, source)
 	s.byMID[source], s.byMID[dest] = retired, key
 	s.byMessage[retired], s.byMessage[key] = source, dest
 	s.messages[retired], s.messages[key] = tombstone, target

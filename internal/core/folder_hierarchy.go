@@ -26,7 +26,9 @@ type MailFolderPlacement struct {
 // If creation was acknowledged with a native ID but readback fails, the
 // returned object carries that ID with the error so a retry can reconcile
 // the exact folder without creating or adopting a similarly named folder.
-// ErrConflict with an empty ID means creation was definitively rejected.
+// With an empty ID, ErrWriteNotDispatched, ErrInvalid, ErrConflict,
+// ErrNotFound, ErrAccessDenied, ErrAuthentication, ErrUnsupported and
+// ErrLimit denote definitive rejection. ErrOutcomeUnknown takes precedence.
 type MailFolderHierarchyWriter interface {
 	CreateMailFolder(context.Context, MailFolderPlacement) (Object, error)
 	UpdateMailFolder(context.Context, Object, MailFolderPlacement) (Object, error)

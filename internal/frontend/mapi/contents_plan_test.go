@@ -145,7 +145,7 @@ func TestContentsPlanningFailureNoPublicationQuotaAndRevocation(t *testing.T) {
 			case "source":
 				box.sourceErr = core.ErrConflict
 			case "projection":
-				box.objects[0].MIME = []byte("Content-Type: application/ms-tnef\r\n\r\nUnsupported")
+				box.objects[0].Properties[core.ReceivedAt] = core.Text("Invalid backend envelope type")
 			case "revocation":
 				box.readHook = func() { f.box.state.Owner = false }
 			case "cancel":

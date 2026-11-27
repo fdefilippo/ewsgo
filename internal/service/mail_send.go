@@ -116,11 +116,21 @@ func (s *MailSender) submit(ctx context.Context, account core.Session, id string
 		return intent, sendStateError(intent.State)
 	}
 
-	sentID, err := attempt(ctx)
+	var sentID core.ID
+	if err = ctx.Err(); err != nil {
+		err = errors.Join(core.ErrSendRetryable, err)
+	} else {
+		sentID, err = attempt(ctx)
+	}
 	state := core.SendConfirmed
-	if errors.Is(err, core.ErrSendRejected) {
+	switch {
+	case errors.Is(err, core.ErrOutcomeUnknown) || sentID != "" && err != nil:
+		return intent, core.ErrOutcomeUnknown
+	case errors.Is(err, core.ErrSendRetryable):
+		state, sentID = core.SendReady, ""
+	case errors.Is(err, core.ErrSendRejected):
 		state, sentID = core.SendFailed, ""
-	} else if err != nil {
+	case err != nil:
 		return intent, core.ErrOutcomeUnknown
 	}
 	// Persist an acknowledgment even if the caller disconnected while the
@@ -131,6 +141,9 @@ func (s *MailSender) submit(ctx context.Context, account core.Session, id string
 		return intent, core.ErrOutcomeUnknown
 	}
 	intent.State, intent.SentID = state, sentID
+	if state == core.SendReady {
+		return intent, err
+	}
 	return intent, sendStateError(state)
 }
 

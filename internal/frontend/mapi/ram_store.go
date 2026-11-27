@@ -20,8 +20,9 @@ import (
 const maxRAMStores = 64
 const maxRAMMappings = 4096
 
-// ramStores belongs to one SessionTransport/installation. Entries never get
-// evicted and counters never get reused in this process. Quotas fail closed.
+// ramStores belongs to one SessionTransport/installation. Idle durable
+// stores can be reloaded from SQLite. Volatile stores stay resident to
+// preserve identifiers for reconnects.
 // No backend session, credentials or token is retained here.
 type ramStores struct {
 	contents         contentsMemory
@@ -32,6 +33,8 @@ type ramStores struct {
 	calendarMetadata bool // Immutable after configuring the transport.
 	mu               sync.Mutex
 	entries          map[core.Scope]*ramStore
+	opening          map[core.Scope]chan struct{}
+	idleSequence     uint64
 	namedStorage     func(context.Context, core.Scope) (NamedPropertyStorage, error)
 	replicaStorage   func(context.Context, core.Scope) (boundReplica, error)
 	nextHandle       atomic.Uint64
@@ -45,6 +48,8 @@ type folderKey struct {
 }
 
 type ramStore struct {
+	pins                  int        // Guarded by allocator.mu.
+	lastIdle              uint64     // Guarded by allocator.mu.
 	foreignReplicas       [][16]byte // Guarded by mu; index + 2 is the nonreused REPLID.
 	foreignReplicaLease   *contentsLease
 	permissionMembers     map[core.Scope]uint64 // Guarded by mu; dedicated, nonreused MemberIds.
@@ -71,6 +76,7 @@ type ramStore struct {
 	contentsProofs        map[[32]byte]*contentsStateProof
 	contentsProofOrder    list.List // Oldest completed checkpoint first, guarded by contentsProofsMu.
 	faiStatePermits       map[*faiStatePermit]bool
+	faiUploadProofs       []*faiStatePermit // Oldest completed upload first, guarded by contentsProofsMu.
 	byMessage             map[messageKey]uint64
 	byMID                 map[uint64]messageKey
 	embeddedMIDs          map[[32]byte]uint64 // Guarded by mu. Embedded IDs are not standalone messages.
@@ -117,6 +123,7 @@ type storeBinding struct {
 	store       *ramStore
 	fids        [specialFolderCount]uint64
 	mailboxGUID [16]byte
+	pinned      bool
 }
 
 func newRAMStores() *ramStores { return &ramStores{entries: make(map[core.Scope]*ramStore)} }
@@ -142,50 +149,171 @@ func (s *ramStores) bind(ctx context.Context, catalog privateFolderCatalog) (sto
 		seen[key] = true
 		keys[i] = key
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	store := s.entries[catalog.scope]
-	if store == nil {
-		if len(s.entries) >= maxRAMStores {
+	for {
+		if err := ctx.Err(); err != nil {
+			return storeBinding{}, err
+		}
+		s.mu.Lock()
+		if store := s.entries[catalog.scope]; store != nil {
+			if store.root != catalog.folders[IPMSubtree].NativeID {
+				s.mu.Unlock()
+				return storeBinding{}, core.ErrConflict
+			}
+			binding := storeBinding{store: store, pinned: store.durable.store != nil}
+			if binding.pinned {
+				store.pins++
+			}
+			s.mu.Unlock()
+			if err := binding.assignFolders(ctx, keys); err != nil {
+				binding.releasePin()
+				return storeBinding{}, err
+			}
+			return binding, nil
+		}
+		if pending := s.opening[catalog.scope]; pending != nil {
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return storeBinding{}, ctx.Err()
+			case <-pending:
+				continue
+			}
+		}
+		if len(s.entries)+len(s.opening) >= maxRAMStores && !s.evictIdle() {
+			s.mu.Unlock()
 			return storeBinding{}, core.ErrUnsupported
 		}
-		store = &ramStore{allocator: s, scope: catalog.scope, root: catalog.folders[IPMSubtree].NativeID, inbox: catalog.folders[Inbox].NativeID, sent: catalog.folders[SentItems].NativeID, trash: catalog.folders[DeletedItems].NativeID, byKey: map[folderKey]uint64{}, byFID: map[uint64]folderKey{}, calendarMetadata: s.calendarMetadata, contactsMetadata: s.contactsMetadata, tasksMetadata: s.tasksMetadata, draftsReference: s.draftsReference, privateConfig: s.privateConfig}
-		_, _ = rand.Read(store.replica[:])
-		_, _ = rand.Read(store.categoryStateKey[:])
-		store.replica[7] = store.replica[7]&0x0f | 0x40 // UUIDv4 in GUID wire order.
-		store.replica[8] = store.replica[8]&0x3f | 0x80
-		if s.namedStorage != nil {
-			backing, err := s.namedStorage(ctx, catalog.scope)
-			if err != nil {
-				return storeBinding{}, err
-			}
-			if err := store.named.load(ctx, backing); err != nil {
-				return storeBinding{}, err
-			}
+		if s.opening == nil {
+			s.opening = make(map[core.Scope]chan struct{})
 		}
-		if s.replicaStorage != nil {
-			backing, err := s.replicaStorage(ctx, catalog.scope)
-			if err != nil {
-				return storeBinding{}, err
-			}
-			if err := store.loadReplica(ctx, backing); err != nil {
-				return storeBinding{}, err
-			}
-		}
-	} else if store.root != catalog.folders[IPMSubtree].NativeID {
-		return storeBinding{}, core.ErrConflict
+		s.opening[catalog.scope] = make(chan struct{})
+		s.mu.Unlock()
+		return s.bindNewStore(ctx, catalog, keys)
 	}
-	ids, err := store.assign(ctx, keys)
-	if err != nil {
-		if s.entries[catalog.scope] == nil {
-			store.releaseReplicaLeases()
+}
+
+func (s *ramStores) bindNewStore(ctx context.Context, catalog privateFolderCatalog, keys []folderKey) (binding storeBinding, err error) {
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err == nil {
+			s.entries[catalog.scope] = binding.store
 		}
-		return storeBinding{}, err
+		close(s.opening[catalog.scope])
+		delete(s.opening, catalog.scope)
+	}()
+	for {
+		store, err := s.openStore(ctx, catalog)
+		if err == nil {
+			binding := storeBinding{store: store, pinned: store.durable.store != nil}
+			if err := binding.assignFolders(ctx, keys); err != nil {
+				store.releaseReplicaLeases()
+				return storeBinding{}, err
+			}
+			if binding.pinned {
+				store.pins = 1
+			}
+			return binding, nil
+		}
+		var budget contentsBudgetError
+		if !errors.As(err, &budget) || ctx.Err() != nil {
+			return storeBinding{}, err
+		}
+		s.mu.Lock()
+		freed := s.evictIdle()
+		s.mu.Unlock()
+		if !freed {
+			return storeBinding{}, err
+		}
 	}
-	s.entries[catalog.scope] = store
-	binding := storeBinding{store: store}
-	copy(binding.fids[:], ids)
-	return binding, nil
+}
+
+func (b *storeBinding) assignFolders(ctx context.Context, keys []folderKey) error {
+	ids, err := b.store.assign(ctx, keys)
+	if err == nil {
+		copy(b.fids[:], ids)
+	}
+	return err
+}
+
+func (s *ramStores) openStore(ctx context.Context, catalog privateFolderCatalog) (*ramStore, error) {
+	store := &ramStore{
+		allocator: s, scope: catalog.scope, root: catalog.folders[IPMSubtree].NativeID,
+		inbox: catalog.folders[Inbox].NativeID, sent: catalog.folders[SentItems].NativeID, trash: catalog.folders[DeletedItems].NativeID,
+		byKey: map[folderKey]uint64{}, byFID: map[uint64]folderKey{},
+		calendarMetadata: s.calendarMetadata, contactsMetadata: s.contactsMetadata, tasksMetadata: s.tasksMetadata,
+		draftsReference: s.draftsReference, privateConfig: s.privateConfig,
+	}
+	_, _ = rand.Read(store.replica[:])
+	_, _ = rand.Read(store.categoryStateKey[:])
+	store.replica[7] = store.replica[7]&0x0f | 0x40 // UUIDv4 in GUID wire order.
+	store.replica[8] = store.replica[8]&0x3f | 0x80
+	if s.namedStorage != nil {
+		backing, err := s.namedStorage(ctx, catalog.scope)
+		if err != nil {
+			return nil, err
+		}
+		if err := store.named.load(ctx, backing); err != nil {
+			return nil, err
+		}
+	}
+	if s.replicaStorage != nil {
+		backing, err := s.replicaStorage(ctx, catalog.scope)
+		if err != nil {
+			return nil, err
+		}
+		if err := store.loadReplica(ctx, backing); err != nil {
+			return nil, err
+		}
+	}
+	return store, nil
+}
+
+// Called with s.mu held. A logon or an in-flight notification scan holds a
+// reference until it has released every object that uses the store.
+func (s *ramStores) evictIdle() bool {
+	var victim *ramStore
+	for _, store := range s.entries {
+		if store.durable.store != nil && store.pins == 0 && (victim == nil || store.lastIdle < victim.lastIdle) {
+			victim = store
+		}
+	}
+	if victim == nil {
+		return false
+	}
+	victim.releaseReplicaLeases()
+	delete(s.entries, victim.scope)
+	return true
+}
+
+func (b storeBinding) releasePin() {
+	if !b.pinned {
+		return
+	}
+	b.store.releasePin()
+}
+
+func (s *ramStore) releasePin() {
+	owner := s.allocator
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	s.pins--
+	if s.pins == 0 {
+		owner.idleSequence++
+		s.lastIdle = owner.idleSequence
+	}
+}
+
+// A notification scan borrows a store under the context lock, while its
+// source logon is still alive. The scan can outlive the logon.
+func (s *ramStore) pinForScan() func() {
+	if s == nil || s.durable.store == nil {
+		return func() {}
+	}
+	s.allocator.mu.Lock()
+	s.pins++
+	s.allocator.mu.Unlock()
+	return s.releasePin
 }
 
 func (s *ramStore) assign(ctx context.Context, keys []folderKey) ([]uint64, error) {
@@ -197,7 +325,7 @@ func (s *ramStore) assign(ctx context.Context, keys []folderKey) ([]uint64, erro
 			needed[key] = true
 		}
 	}
-	if s.mappingCountLocked()+len(needed) > maxRAMMappings || s.next+uint64(len(needed)) >= 1<<48 {
+	if s.mappingCountLocked()+len(needed) > s.mappingLimit() || s.next+uint64(len(needed)) >= 1<<48 {
 		return nil, core.ErrUnsupported
 	}
 	ids := make([]uint64, len(keys))
@@ -238,6 +366,13 @@ func (s *ramStore) assign(ctx context.Context, keys []folderKey) ([]uint64, erro
 func (s *ramStore) mappingCountLocked() int {
 	return len(s.byKey) + len(s.byMessage) + len(s.embeddedMIDs) + len(s.recoverableMIDs) + s.unboundCreations + s.unboundMoves +
 		len(s.pendingMailDrafts) + len(s.pendingMessageImports)
+}
+
+func (s *ramStore) mappingLimit() int {
+	if s.durable.store != nil {
+		return mapireplica.MaxBindings
+	}
+	return maxRAMMappings
 }
 
 type storeFolder struct {

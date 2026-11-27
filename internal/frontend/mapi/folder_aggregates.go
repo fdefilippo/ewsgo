@@ -70,7 +70,7 @@ func (s *ramStore) observeFolderAggregatesAt(ctx context.Context, session core.S
 	}
 	old, exists := s.folderAggregates[folder]
 	if marker != nil && exists && marker.Sequence == old.sequence && marker.Children == old.children &&
-		marker.MessageCount == uint64(len(old.messages)) {
+		(marker.UntypedCount || marker.MessageCount == uint64(len(old.messages))) {
 		return old.folderAggregateValues, nil
 	}
 	var prior *uint64
@@ -97,7 +97,7 @@ func (s *ramStore) observeFolderAggregatesAt(ctx context.Context, session core.S
 	if err := ctx.Err(); err != nil {
 		return folderAggregateValues{}, err
 	}
-	if marker != nil && (marker.Sequence != next.Sequence || marker.Children != next.Children || marker.MessageCount != next.MessageCount) {
+	if marker != nil && (marker.Sequence != next.Sequence || marker.Children != next.Children || !marker.UntypedCount && marker.MessageCount != next.MessageCount) {
 		if exists {
 			return old.folderAggregateValues, nil
 		}
@@ -107,7 +107,7 @@ func (s *ramStore) observeFolderAggregatesAt(ctx context.Context, session core.S
 		return folderAggregateValues{}, core.ErrConflict
 	}
 	if exists && next.Sequence == old.sequence && !shared {
-		if next.MessageCount != uint64(len(old.messages)) {
+		if !next.CountOmitted && next.MessageCount != uint64(len(old.messages)) {
 			return folderAggregateValues{}, core.ErrConflict
 		}
 		if next.Children != old.children {
@@ -117,7 +117,7 @@ func (s *ramStore) observeFolderAggregatesAt(ctx context.Context, session core.S
 		}
 		return old.folderAggregateValues, nil
 	}
-	if next.MessageCount > core.MaxMailContentIndexItems || next.MessageCount != uint64(len(next.MessageIDs)) {
+	if next.CountOmitted || next.MessageCount > core.MaxMailContentIndexItems || next.MessageCount != uint64(len(next.MessageIDs)) {
 		return folderAggregateValues{}, core.ErrInvalid
 	}
 	slices.Sort(next.MessageIDs)

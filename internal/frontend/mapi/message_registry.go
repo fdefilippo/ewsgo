@@ -11,6 +11,7 @@ import (
 	"errors"
 	"hash"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,15 @@ import (
 )
 
 const maxMessageRegistryBytes = 1 << 20 // Accounted keys/version metadata only.
+const maxPersistentMessageRegistryBytes = 8 << 20
+
+func (s *ramStore) messageRegistryLimit() int {
+	if s.durable.store != nil {
+		return maxPersistentMessageRegistryBytes
+	}
+	return maxMessageRegistryBytes
+}
+
 const pendingMessageMoveBytes = 192 + 24 + 25*maxFAIPCLReplicas
 
 // Carries only a server policy category, never the native role or folder ID.
@@ -116,7 +126,8 @@ func (s *ramStore) observeMailMessageSet(ctx context.Context, session core.Sessi
 		if folder == "" {
 			return nil, nil
 		} // Genuine EWSGo service/RAM normal namespace.
-		if index, ok := box.(core.MailContentIndexer); allowIndex && ok && !outbox && !s.needsCompleteMailObjects(anchor, folder) {
+		reader, canReadMIME := box.(core.MailMessageMIMEReader)
+		if index, ok := box.(core.MailContentIndexer); allowIndex && ok && !outbox && !s.needsCompleteMailObjects(anchor, folder, canReadMIME) {
 			view, err := index.ReadMailContentIndex(ctx, folder)
 			if err != nil && !errors.Is(err, core.ErrUnsupported) {
 				return nil, err
@@ -130,7 +141,11 @@ func (s *ramStore) observeMailMessageSet(ctx context.Context, session core.Sessi
 						return nil, core.ErrInvalid
 					}
 				}
-				return annotateDeferredActionTargets(ctx, box, s.filterOutboxDrafts(view.Messages, folder, false))
+				objects, err := s.filterIndexedImportCandidates(ctx, reader, anchor, folder, view.Messages)
+				if err != nil {
+					return nil, err
+				}
+				return annotateDeferredActionTargets(ctx, box, s.filterOutboxDrafts(objects, folder, false))
 			}
 		}
 		source, ok := box.(core.MailContentReader)
@@ -155,12 +170,14 @@ func (s *ramStore) observeMailMessageSet(ctx context.Context, session core.Sessi
 
 // Called under contentsMu. Pending writes can require the actual MIME digest
 // or the draft recovery header before assigning a native message its MID.
-func (s *ramStore) needsCompleteMailObjects(anchor uint64, folder core.ID) bool {
+func (s *ramStore) needsCompleteMailObjects(anchor uint64, folder core.ID, canReadMIME bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, p := range s.pendingMessageImports {
-		if folderID(p.Parent) == anchor {
-			return true
+	if !canReadMIME {
+		for _, p := range s.pendingMessageImports {
+			if folderID(p.Parent) == anchor && p.Special() == 0 && p.NativeID == "" {
+				return true
+			}
 		}
 	}
 	for _, p := range s.pendingMailDrafts {
@@ -637,6 +654,13 @@ func (s *ramStore) commitMessages(ctx context.Context, anchor uint64, associated
 	if _, ok := s.byFID[anchor]; !ok {
 		return messageSnapshot{}, core.ErrNotFound
 	}
+	if !associated && special == 0 {
+		// A pending append may own an undiscovered native message. Withhold
+		// only those candidates while the rest of the folder advances.
+		nodes = slices.DeleteFunc(nodes, func(n messageNode) bool {
+			return n.key.special == 0 && s.byMessage[n.key] == 0 && s.pendingImportedMessage(anchor, n.object)
+		})
+	}
 	needed, allocatedIDs, advances, budget := 0, 0, 0, s.messageRegistryBytesLocked()
 	current := map[messageKey]bool{}
 	proposed := make(map[messageKey]uint64, len(nodes))
@@ -654,9 +678,6 @@ func (s *ramStore) commitMessages(ctx context.Context, anchor uint64, associated
 		}
 	}
 	for _, n := range nodes {
-		if !associated && n.key.special == 0 && s.byMessage[n.key] == 0 && s.pendingImportedMessage(anchor, n.object) {
-			return messageSnapshot{}, core.ErrOutcomeUnknown
-		}
 		if !associated && n.key.special == core.CalendarFolder && s.byMessage[n.key] == 0 && s.pendingCalendarImport(anchor, n.object) {
 			return messageSnapshot{}, core.ErrOutcomeUnknown
 		}
@@ -715,7 +736,7 @@ func (s *ramStore) commitMessages(ctx context.Context, anchor uint64, associated
 			advances++
 		}
 	}
-	if s.mappingCountLocked()+needed-len(reconciled) > maxRAMMappings || budget > maxMessageRegistryBytes || s.next > maxGlobalCount || uint64(allocatedIDs+advances) > maxGlobalCount-s.next {
+	if s.mappingCountLocked()+needed-len(reconciled) > s.mappingLimit() || budget > s.messageRegistryLimit() || s.next > maxGlobalCount || uint64(allocatedIDs+advances) > maxGlobalCount-s.next {
 		return messageSnapshot{}, core.ErrUnsupported
 	}
 	versions := make(map[messageKey]messageVersion, len(s.messages)+needed)
@@ -791,7 +812,7 @@ func (s *ramStore) commitMessages(ctx context.Context, anchor uint64, associated
 		budget += len(v.change) + len(v.history) - len(versions[key].change) - len(versions[key].history)
 		versions[key] = v
 	}
-	if budget > maxMessageRegistryBytes {
+	if budget > s.messageRegistryLimit() {
 		return messageSnapshot{}, core.ErrUnsupported
 	}
 	// A newly observed absent FAI has no object or CN. Advance the allocation

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -45,12 +46,9 @@ func (m *mailbox) readMailContentIndex(ctx context.Context, folder core.ID, nati
 	if before.MessageCount > core.MaxMailContentIndexItems {
 		return core.MailContents{}, ErrLimit
 	}
-	index, err := m.native.mailIndexEntries(ctx, native)
+	index, err := m.native.verifiedMailIndex(ctx, native, before.MessageCount)
 	if err != nil {
 		return core.MailContents{}, err
-	}
-	if uint64(len(index)) != before.MessageCount {
-		return core.MailContents{}, core.ErrConflict
 	}
 	result := core.MailContents{Folder: folder, Messages: make([]core.Object, 0, len(index))}
 	used := 0
@@ -61,7 +59,7 @@ func (m *mailbox) readMailContentIndex(ctx context.Context, folder core.ID, nati
 			return core.MailContents{}, mailContentRace(err)
 		}
 		for i, item := range items {
-			if item.message.Folder != native || item.message.ContentRevision != batch[i].revision {
+			if item.message.Folder != native || item.message.ContentRevision != batch[i].revision || strings.ContainsRune(item.message.Flags, 'x') {
 				return core.MailContents{}, core.ErrConflict
 			}
 			bytes := item.bytes()
@@ -93,45 +91,90 @@ func (m *mailbox) readMailContentIndex(ctx context.Context, folder core.ID, nati
 	return result, nil
 }
 
-func (s *Session) mailIndexEntries(ctx context.Context, folder string) ([]mailIndexEntry, error) {
-	const pageSize = 100
-	seen := make(map[string]bool)
-	var entries []mailIndexEntry
-	for {
-		offset := strconv.Itoa(len(entries))
-		q := element(mailNS, "SearchRequest", "", element(mailNS, "query", "inid:"+folder))
-		q = attr(attr(attr(attr(q, "types", "message"), "limit", strconv.Itoa(pageSize)), "offset", offset), "sortBy", "dateDesc")
-		page, err := s.request(ctx, mailNS, "Search", "", q)
+// GetFolder n counts all visible item types. A mail-only
+// search can prove completeness directly, or by matching the mail subset
+// of a complete mixed search inside the caller's unchanged folder markers.
+func (s *Session) verifiedMailIndex(ctx context.Context, folder string, count uint64) ([]mailIndexEntry, error) {
+	mail, total, err := s.scanMailIndex(ctx, folder, false)
+	if err != nil {
+		return nil, err
+	}
+	if uint64(total) != count {
+		mixed, total, err := s.scanMailIndex(ctx, folder, true)
 		if err != nil {
 			return nil, err
 		}
+		if uint64(total) != count {
+			return nil, core.ErrConflict
+		}
+		sorted := func(a, b mailIndexEntry) int { return strings.Compare(a.id, b.id) }
+		slices.SortFunc(mail, sorted)
+		slices.SortFunc(mixed, sorted)
+		if !slices.Equal(mail, mixed) {
+			return nil, core.ErrConflict
+		}
+	}
+	return mail, nil
+}
+
+func (s *Session) scanMailIndex(ctx context.Context, folder string, mixed bool) ([]mailIndexEntry, int, error) {
+	const pageSize = 100
+	types := "message"
+	if mixed {
+		types = "message,contact,appointment,task,document"
+	}
+	seen := make(map[string]bool)
+	var entries []mailIndexEntry
+	total := 0
+	for {
+		offset := strconv.Itoa(total)
+		q := element(mailNS, "SearchRequest", "", element(mailNS, "query", "inid:"+folder))
+		q = attr(attr(attr(attr(q, "types", types), "limit", strconv.Itoa(pageSize)), "offset", offset), "sortBy", "dateDesc")
+		q = attr(q, "includeTagDeleted", "0")
+		page, err := s.request(ctx, mailNS, "Search", "", q)
+		if err != nil {
+			return nil, 0, err
+		}
 		if page.get("offset") != offset || len(page.Children) > pageSize {
-			return nil, ErrProtocol
+			return nil, 0, ErrProtocol
+		}
+		total += len(page.Children)
+		if total > core.MaxMailContentIndexItems {
+			return nil, 0, ErrLimit
 		}
 		for _, row := range page.Children {
 			id := row.get("id")
-			revision, ok := syncNumber(row.get("rev"))
-			if row.XMLName != (xml.Name{Space: mailNS, Local: "m"}) || !nativeID.MatchString(id) || !ok {
-				return nil, ErrProtocol
+			if row.XMLName.Space != mailNS || !nativeID.MatchString(id) {
+				return nil, 0, ErrProtocol
 			}
-			if seen[id] || row.get("l") != folder {
-				return nil, core.ErrConflict
+			if seen[id] || row.get("l") != folder || strings.ContainsRune(row.get("f"), 'x') {
+				return nil, 0, core.ErrConflict
 			}
 			seen[id] = true
-			entries = append(entries, mailIndexEntry{id, revision})
-		}
-		if len(entries) > core.MaxMailContentIndexItems {
-			return nil, ErrLimit
+			switch row.XMLName.Local {
+			case "m":
+				revision, ok := syncNumber(row.get("rev"))
+				if !ok {
+					return nil, 0, ErrProtocol
+				}
+				entries = append(entries, mailIndexEntry{id: id, revision: revision})
+			case "cn", "appt", "task", "doc":
+				if !mixed {
+					return nil, 0, ErrProtocol
+				}
+			default:
+				return nil, 0, ErrProtocol
+			}
 		}
 		switch page.get("more") {
 		case "0", "false":
-			return entries, nil
+			return entries, total, ctx.Err()
 		case "1", "true":
 			if len(page.Children) == 0 {
-				return nil, ErrProtocol
+				return nil, 0, ErrProtocol
 			}
 		default:
-			return nil, ErrProtocol
+			return nil, 0, ErrProtocol
 		}
 	}
 }

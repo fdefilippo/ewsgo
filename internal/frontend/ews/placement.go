@@ -87,7 +87,7 @@ func (h *Handler) placeItems(ctx context.Context, op node, s core.Session) []nod
 			return syncError(name, core.ErrInvalid)
 		}
 	}
-	if !hasPlacement && deleteMode != "SoftDelete" {
+	if name != "DeleteItem" && !hasPlacement {
 		return syncError(name, core.ErrUnsupported)
 	}
 	ids := op.child(messages, "ItemIds")
@@ -140,6 +140,10 @@ func (h *Handler) placeItems(ctx context.Context, op node, s core.Session) []nod
 				}
 				continue
 			}
+		}
+		if name == "DeleteItem" && deleteMode == "MoveToDeletedItems" && !hasPlacement {
+			out = append(out, writeFailure(name, core.ErrUnsupported, "ErrorItemNotFound"))
+			continue
 		}
 		item, err := h.currentItem(ctx, s, ref)
 		if err != nil {

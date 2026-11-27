@@ -5,11 +5,13 @@ package mapi
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"reflect"
 	"testing"
 
 	"ewsgo/internal/core"
+	"ewsgo/internal/mapireplica"
 )
 
 func TestFAIAbsentDeleteDoesNotInventMessageOrChange(t *testing.T) {
@@ -112,35 +114,61 @@ func TestFAIAbsentDeleteAtomicBatchAndGuards(t *testing.T) {
 	}
 }
 
-func TestFAIAbsentDeletePreventsStagedSaveAndSharesQuota(t *testing.T) {
+func TestFAIHistoryDoesNotConsumeActiveQuota(t *testing.T) {
 	f, _ := messageFixture(t)
+	ctx := t.Context()
+	reopen := sqliteReplicaFixture(t, f)
+	db := reopen()
 	request := syntheticFAIImport()
 	draft := newFAIDraftForTest(t, f, request)
-	if err := f.store.deleteFAI(context.Background(), f.session, draft.root, faiDeleteRequest{sources: [][22]byte{request.source}}); err != nil {
-		t.Fatal("delete staged identity")
+	root := draft.root
+	if err := f.store.deleteFAI(ctx, f.session, root, faiDeleteRequest{sources: [][22]byte{request.source}}); err != nil {
+		t.Fatal("delete staged identity", err)
 	}
-	if _, err := draft.save(context.Background(), f.session, 4); !errors.Is(err, core.ErrConflict) {
+	if _, err := draft.save(ctx, f.session, 4); !errors.Is(err, core.ErrConflict) {
 		t.Fatal("ForceSave resurrected an absent deleted identity")
 	}
 	draft.close()
-	var sources [][22]byte
-	for i := 1; i < maxFAIObjects; i++ {
-		sources = append(sources, faiTestXID(55, byte(i)))
+	existing := syntheticFAIImport()
+	existing.source = faiTestXID(57, 1)
+	live := newFAIDraftForTest(t, f, existing)
+	saveFAIDraftForTest(t, f, live, 2)
+	live.close()
+	if err := f.store.deleteFAI(ctx, f.session, root, faiDeleteRequest{sources: [][22]byte{existing.source}}); err != nil {
+		t.Fatal("delete persisted FAI", err)
 	}
-	if err := f.store.deleteFAI(context.Background(), f.session, draft.root, faiDeleteRequest{sources: sources}); err != nil {
-		t.Fatal("fill tombstone quota")
+	sources := make([][22]byte, mapireplica.MaxFAITombstones-2)
+	for i := range sources {
+		sources[i][0] = 55
+		binary.BigEndian.PutUint32(sources[i][18:], uint32(i+1))
+	}
+	for offset := 0; offset < len(sources); offset += maxFAIObjects {
+		batch := sources[offset:min(offset+maxFAIObjects, len(sources))]
+		if err := f.store.deleteFAI(ctx, f.session, root, faiDeleteRequest{sources: batch}); err != nil {
+			t.Fatalf("fill tombstone quota at %d: %v", offset, err)
+		}
 	}
 	used, next := f.stores.contents.used, f.store.next
-	if err := f.store.deleteFAI(context.Background(), f.session, draft.root, faiDeleteRequest{sources: [][22]byte{faiTestXID(56, 1)}}); !errors.Is(err, core.ErrUnsupported) || len(f.store.fai.absent) != maxFAIObjects || f.stores.contents.used != used || f.store.next != next {
-		t.Fatal("absent tombstone quota not atomic")
+	if err := f.store.deleteFAI(ctx, f.session, root, faiDeleteRequest{sources: [][22]byte{faiTestXID(56, 1)}}); !errors.Is(err, core.ErrUnsupported) ||
+		len(f.store.fai.absent) != mapireplica.MaxFAITombstones-1 || f.stores.contents.used != used || f.store.next != next {
+		t.Fatal("tombstone quota not atomic")
 	}
-	other := request
-	other.source = faiTestXID(57, 1)
-	if d, err := f.store.newFAIDraft(context.Background(), f.session, draft.root, other); !errors.Is(err, core.ErrUnsupported) {
-		if d != nil {
-			d.close()
-		}
-		t.Fatal("live FAI did not share absent tombstone quota")
+	replacement := syntheticFAIImport()
+	replacement.source = faiTestXID(58, 1)
+	live = newFAIDraftForTest(t, f, replacement)
+	saved := saveFAIDraftForTest(t, f, live, 2)
+	live.close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopen()
+	if !f.store.fai.records[faiIDForSource(existing.source)].deleted || f.store.fai.absent[request.source] != root ||
+		len(f.store.fai.absent) != mapireplica.MaxFAITombstones-1 {
+		t.Fatal("restart lost deletion history")
+	}
+	got, err := f.store.readFAIRowLocked(ctx, root, faiIDForSource(replacement.source))
+	if err != nil || got.mid != saved.mid {
+		t.Fatalf("retained history prevented storing replacement: %v", err)
 	}
 }
 

@@ -241,6 +241,8 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 			if err != nil {
 				return err
 			}
+			stopMaintenance := startJournalMaintenance(ctx, store, logger)
+			defer stopMaintenance()
 		}
 		mux.Handle("/EWS/Exchange.asmx", core.BasicTLS(backend, frontend.Serve))
 		discovery := core.BasicTLS(backend, autodiscover.Spike)
@@ -392,14 +394,13 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	}
 	defer listener.Close()
 	server := &http.Server{
-		Handler:           handler,
+		Handler:           withRequestBudget(handler, protocolRequestBudget),
 		ErrorLog:          httpServerLogger(logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    32 << 10,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	if cfg.CertFile != "" {
 		listener = tls.NewListener(listener, &tls.Config{
@@ -407,26 +408,39 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 			Certificates: []tls.Certificate{certificate},
 		})
 	}
+	logger.Info("service listening", "address", listener.Addr().String(), "tls", cfg.CertFile != "")
+	if err := serveHTTP(ctx, server, listener, 5*time.Second); err != nil {
+		return err
+	}
+	logger.Info("service stopped")
+	return nil
+}
+
+func serveHTTP(ctx context.Context, server *http.Server, listener net.Listener, gracePeriod time.Duration) error {
+	requests, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRequests()
+	server.BaseContext = func(net.Listener) context.Context { return requests }
 	finished := make(chan error, 1)
 	go func() { finished <- server.Serve(listener) }()
-	logger.Info("service listening", "address", listener.Addr().String(), "tls", cfg.CertFile != "")
+
 	select {
-	case err := <-finished:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-		return nil
 	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdown, cancel := context.WithTimeout(context.Background(), gracePeriod)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
+			cancelRequests()
 			_ = server.Close()
+			<-finished
 			return errors.New("graceful shutdown timed out")
 		}
-		if err := <-finished; !errors.Is(err, http.ErrServerClosed) {
-			return err
+	case err := <-finished:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
 		}
-		logger.Info("service stopped")
-		return nil
+		return err
 	}
+	if err := <-finished; !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

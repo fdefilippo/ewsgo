@@ -213,7 +213,7 @@ func (h *Handler) getRecurringMaster(ctx context.Context, s core.Session, select
 func (h *Handler) appointment(scope core.Scope, appointment core.Appointment) node {
 	item := appointment.Identity
 	children := []node{
-		at(at(el(types, "ItemId", ""), "Id", h.itemID(scope, item)), "ChangeKey", h.appointmentChangeKey(scope, appointment)),
+		at(at(el(types, "ItemId", ""), "Id", h.itemID(scope, item)), "ChangeKey", h.changeKey(scope, item)),
 		at(el(types, "ParentFolderId", ""), "Id", h.encode(scope, item.Parent)),
 		el(types, "ItemClass", "IPM.Appointment"),
 		el(types, "Subject", appointment.Subject),
@@ -290,12 +290,4 @@ func meetingReplyStatus(choice core.MeetingReplyChoice) string {
 	default:
 		return "NoResponseReceived"
 	}
-}
-
-func (h *Handler) appointmentChangeKey(scope core.Scope, appointment core.Appointment) string {
-	item := appointment.Identity
-	if appointment.SeriesID != "" {
-		item.ID = appointment.SeriesID
-	}
-	return h.changeKey(scope, item)
 }

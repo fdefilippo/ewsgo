@@ -5,11 +5,13 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"ewsgo/internal/core"
+	"ewsgo/internal/mapireplica"
 )
 
 func TestMAPIReplicaAtomicBindingsAndReopen(t *testing.T) {
@@ -198,5 +200,55 @@ func TestMAPIStagedIDProvenanceAndRollback(t *testing.T) {
 	current.HighWater = 2
 	if err := store.CommitMAPIReplica(ctx, mailbox, current, MAPIReplicaMutation{HighWater: 3, StagedBindings: []MAPIObjectID{binding}}); !errors.Is(err, core.ErrConflict) {
 		t.Fatalf("staged ID consumed twice: %v", err)
+	}
+}
+
+func TestMAPIReplicaReopenIgnoresRetiredSpoolerEntries(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "retired-spooler.sqlite")
+	store, mailbox := openJournalFixture(t, path)
+	snapshot, err := store.LoadMAPIReplica(ctx, mailbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []MAPIObjectID{
+		{Namespace: MAPIFolder, Key: []byte("drafts"), Counter: 1},
+		{Namespace: MAPIFolder, Key: []byte("destination"), Counter: 2},
+		{Namespace: MAPIMessage, Key: mapireplica.RetiredMessageKey(3), Counter: 3},
+		{Namespace: MAPIMessage, Key: mapireplica.RetiredMessageKey(4), Counter: 4},
+		{Namespace: MAPIMessage, Key: mapireplica.RetiredMessageKey(5), Counter: 5},
+		{Namespace: MAPIMessage, Key: []byte("\x00m:1"), Counter: 6},
+		{Namespace: MAPIMessage, Key: []byte("\x00m:2"), Counter: 7},
+		{Namespace: MAPIMessage, Key: []byte("\x00m:3"), Counter: 8},
+		{Namespace: MAPIMessage, Key: []byte("\x00draft"), Counter: 9},
+	}
+	if err := store.AdvanceMAPIReplica(ctx, mailbox, snapshot.Version, 12, ids); err != nil {
+		t.Fatal(err)
+	}
+	for i, state := range []mapireplica.SpoolerState{mapireplica.SpoolerQueued, mapireplica.SpoolerDispatching, mapireplica.SpoolerAccepted} {
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO mapi_message_moves VALUES (?, ?, ?, 1, 2, ?, X'0100000000000000', ?, ?, 0);
+		`, mailbox, 3+i, 6+i, fmt.Sprintf("m:%d", i+1), append([]byte{1}, make([]byte, 31)...), 10+i); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO mapi_spooler VALUES (?, ?, 1, X'0100000000000000', ?);
+		`, mailbox, 3+i, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO mapi_spooler VALUES (?, 9, 1, X'0100000000000000', 2);
+	`, mailbox); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _ := openJournalFixture(t, path)
+	snapshot, err = reopened.LoadMAPIReplica(ctx, mailbox)
+	want := mapireplica.SpoolerEntry{Counter: 9, Folder: 1, Revision: 1, State: mapireplica.SpoolerDispatching}
+	if err != nil || len(snapshot.Spooler) != 1 || snapshot.Spooler[0] != want || len(snapshot.MessageMoves) != 3 {
+		t.Fatalf("retired spooler recovery: queue %v, moves %d, err %v", snapshot.Spooler, len(snapshot.MessageMoves), err)
 	}
 }

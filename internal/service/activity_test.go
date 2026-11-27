@@ -79,9 +79,16 @@ func (a activityAuth) Authenticate(ctx context.Context, _, _ string) (core.Sessi
 	return a.session, a.err
 }
 
-type activitySession struct{ core.Session }
+type activitySession struct {
+	core.Session
+	closeError error
+}
 
 func (s activitySession) Close(ctx context.Context) error {
+	if s.closeError != nil {
+		core.RecordActivity(ctx, core.Activity{Layer: "backend", Operation: "EndSession", Result: core.ActivityOutcome(s.closeError)})
+		return s.closeError
+	}
 	core.RecordActivity(ctx, core.Activity{Layer: "backend", Operation: "EndSession", Result: core.ActivitySuccess})
 	return s.Session.Close(ctx)
 }
@@ -91,7 +98,41 @@ func activityFixture(t *testing.T) core.Session {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return activitySession{&importProbeSession{box: box}}
+	return activitySession{Session: &importProbeSession{box: box}}
+}
+
+func TestOperationalLoggingReportsLogoutFailureWithoutChangingResponse(t *testing.T) {
+	session := activitySession{Session: activityFixture(t), closeError: errors.New("PRIVATE logout token")}
+	for _, level := range []string{"none", "err", "warn", "info", "debug"} {
+		t.Run(level, func(t *testing.T) {
+			var output bytes.Buffer
+			logger, err := NewLogger(&output, level)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := operationalTrace(logger, core.BasicTLS(activityAuth{session: session},
+				func(w http.ResponseWriter, _ *http.Request, _ core.Session) {
+					w.WriteHeader(http.StatusNoContent)
+				}))
+			request := httptest.NewRequest(http.MethodPost, "https://example.invalid/EWS/Exchange.asmx", nil)
+			request.SetBasicAuth("fixture@example.invalid", "synthetic")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusNoContent || strings.Contains(output.String(), "PRIVATE") {
+				t.Fatal("logout failure changed HTTP response or leaked error details")
+			}
+			events := logEvents(t, output.Bytes())
+			if level == "none" {
+				if len(events) != 0 {
+					t.Fatal("logging is disabled")
+				}
+				return
+			}
+			if len(events) == 0 || events[0]["level"] != "ERROR" || events[0]["session_end_error"] != "failure" || events[0]["result"] != "success" {
+				t.Fatal("missing isolated logout failure", events)
+			}
+		})
+	}
 }
 
 const activitySOAP = `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><m:GetFolder xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"><m:FolderIds><t:DistinguishedFolderId xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types" Id="PRIVATE-unknown-folder"/></m:FolderIds></m:GetFolder></s:Body></s:Envelope>`

@@ -42,11 +42,14 @@ func indexedContentsPayload(row messageRow) (projectedMessage, error) {
 	if !ok || size < 0 {
 		return projectedMessage{}, core.ErrInvalid
 	}
-	p := projectedMessage{values: contentsValues{}, size: int(min(size, core.Integer(maxMailProjectionBytes)))}
-	if err := projectMailContentsMetadata(p.values, row.object); err != nil {
+	p, err := projectMailEnvelope(row.object)
+	if err != nil {
 		return projectedMessage{}, err
 	}
-	putContentsValue(p.values, 0x0e070003, core.Integer(mailContentsFlags(row.object, false)))
+	p.size = int(min(size, core.Integer(maxMailProjectionBytes)))
+	hasAttachments := row.object.Properties[core.HasAttachments] == core.Bool(true)
+	putContentsValue(p.values, 0x0e1b000b, core.Bool(hasAttachments))
+	putContentsValue(p.values, 0x0e070003, core.Integer(mailContentsFlags(row.object, hasAttachments)))
 	addContentsRowMetadata(&p, row)
 	return p, nil
 }

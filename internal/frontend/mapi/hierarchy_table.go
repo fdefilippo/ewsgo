@@ -126,7 +126,7 @@ func captureHierarchyTable(ctx context.Context, session core.Session, binding st
 				nanos := int64(aggregate.committed%10000000) * 100
 				putContentsValue(values, 0x670a0040, core.Timestamp(time.Unix(seconds, nanos).UTC()))
 				putContentsValue(values, 0x670b0003, core.Integer(aggregate.removed))
-				if shared {
+				if shared || marker.UntypedCount {
 					putContentsValue(values, 0x36020003, core.Integer(aggregate.count))
 				}
 			case ctx.Err() != nil:

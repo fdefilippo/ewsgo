@@ -64,10 +64,10 @@ func parseMeetingInvitation(item node) (core.MeetingInvitation, string, error) {
 		return meeting, "", err
 	}
 	if len(meeting.Attendees) == 0 || itemFields.Type != core.AppointmentSingle || itemFields.AllDay ||
-		!itemFields.Start.Before(itemFields.End) || itemFields.TimeZone != "" && itemFields.TimeZone != "UTC" {
+		!itemFields.Start.Before(itemFields.End) {
 		return meeting, "", core.ErrUnsupported
 	}
-	itemFields.Start, itemFields.End, itemFields.TimeZone = itemFields.Start.UTC(), itemFields.End.UTC(), ""
+	itemFields.Start, itemFields.End = itemFields.Start.UTC(), itemFields.End.UTC()
 	meeting.Appointment = itemFields
 	slices.SortFunc(meeting.Attendees, func(a, b core.MeetingAttendee) int {
 		return strings.Compare(strings.ToLower(a.Address), strings.ToLower(b.Address))

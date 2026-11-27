@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -267,5 +268,68 @@ func TestIndexedContentsMoveWithSeparateFolderCheckpoints(t *testing.T) {
 				t.Fatal("unchanged destination retransmitted the moved message")
 			}
 		})
+	}
+}
+
+func TestUnsupportedMIMEKeepsTableAndContentsUsable(t *testing.T) {
+	f, box := indexedContentsFixture(t, 2, 0)
+	f.transport.EnableContentsTableSpike()
+	box.objects[0].MIME = []byte("From: synthetic@example.invalid\r\nSubject: Ordinary mail\r\n\r\nOrdinary body")
+	bad := &box.objects[1]
+	original := []byte("Subject: Signed mail\r\nContent-Type: multipart/signed; boundary=test\r\n\r\n--test\r\n\r\nSigned content\r\n--test--\r\n")
+	bad.MIME = bytes.Clone(original)
+	bad.Properties[core.Subject] = core.Text("Signed mail")
+	for i := range box.objects {
+		box.objects[i].Properties[core.MessageSize] = core.Integer(len(box.objects[i].MIME))
+	}
+	if _, err := projectMailContents(*bad); !errors.Is(err, core.ErrUnsupported) {
+		t.Fatalf("invalid fixture, strict projection returned %v", err)
+	}
+	table, _ := openTableTest(t, f, 0x50)
+	if len(table.rows) != 2 || table.rows[0][fixedContentsProperty(0x0037001f)] != core.Text("Ordinary mail") ||
+		table.rows[1][fixedContentsProperty(0x0037001f)] != core.Text("Signed mail") {
+		t.Fatal("a MIME-format error removed a valid contents table row")
+	}
+	f.run([]byte{1, 4, 2})
+	download := func(initial contentsSyncState, want ...string) contentsSyncState {
+		t.Helper()
+		configureContentsTest(t, f, fullContentsConfig())
+		uploadContentsWireTest(t, f, initial)
+		raw := drainFX(t, f.run, 2, 4096)
+		f.run([]byte{1, 4, 2})
+		var bodies []string
+		for _, token := range decodeTestContents(t, raw) {
+			if token.tag == 0x1000001f {
+				bodies = append(bodies, token.value.(string))
+			}
+		}
+		if !slices.Equal(bodies, want) {
+			t.Fatalf("unexpected body projections: %q", bodies)
+		}
+		return contentsFourTestSets(t, raw)
+	}
+	initial := download(contentsSyncState{}, "Ordinary body", unprojectableMailBody)
+	if !bytes.Equal(bad.MIME, original) {
+		t.Fatal("MAPI changed the original MIME")
+	}
+
+	bad.MIME = []byte("Subject: Updated mail\r\n\r\nReprocessed body")
+	bad.Revision++
+	bad.Properties[core.MetadataRevision] = core.Integer(bad.Revision)
+	bad.Properties[core.ContentRevision] = core.Integer(4)
+	bad.Properties[core.MessageSize] = core.Integer(len(bad.MIME))
+	updated := download(initial, "Reprocessed body")
+	if !reflect.DeepEqual(initial.given, updated.given) || reflect.DeepEqual(initial.seen, updated.seen) {
+		t.Fatal("the reprocessed message should retain its identity and send an updated version")
+	}
+}
+
+func TestContentsTableUsesIndexWhenFullMIMECaptureExceedsLimit(t *testing.T) {
+	f, box := indexedContentsFixture(t, 340, 0)
+	f.transport.EnableContentsTableSpike()
+	box.sourceErr = core.ErrLimit
+	table, _ := openTableTest(t, f, 0x50)
+	if len(table.rows) != 340 || len(box.mimeReads) != 0 {
+		t.Fatalf("large contents table returned %d rows and read %d MIME objects", len(table.rows), len(box.mimeReads))
 	}
 }

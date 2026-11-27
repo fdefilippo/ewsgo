@@ -115,3 +115,33 @@ func TestCreateAppointmentRecoversByUIDWithoutRepeatingNativeWrite(t *testing.T)
 		t.Fatalf("got ID %q, error %v, creates %d, reads %d", item.Identity.ID, err, creates.Load(), reads.Load())
 	}
 }
+
+func TestAppointmentContentsProjectsDetachedOccurrence(t *testing.T) {
+	// A Terra recipient received just the modified occurrence, without RRULE.
+	detail, err := parseXML([]byte(`<appt xmlns="urn:zimbraMail" id="42" l="10" uid="test@example.invalid" ms="15" rev="13" md="1795757815">
+		<inv><comp ex="1" ridZ="20261218T053600Z" class="PUB" name="Detached occurrence">
+			<exceptId d="20261218T053600Z"/>
+			<s d="20261218T063600Z" u="1797575760000"/><e d="20261218T073600Z" u="1797579360000"/>
+		</comp></inv>
+	</appt>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := core.Object{ID: "a:42", Parent: "f:10", Revision: 15, Properties: core.Properties{
+		core.IsRead: core.Bool(true), core.ContentRevision: core.Integer(13), core.AppointmentRecurring: core.Bool(false),
+	}}
+	item, err := appointmentDetailForRow(row, detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Identity.ID != "appointment:42" || item.Identity.Parent != "f:10" || item.Type != core.AppointmentSingle ||
+		item.Recurrence != nil || item.SeriesID != "" || item.Participation != core.AppointmentReceived ||
+		!item.OriginalStart.Equal(item.Start.Add(-time.Hour)) || !item.Start.Equal(time.UnixMilli(1797575760000)) ||
+		item.Identity.Properties[core.IsRead] != core.Bool(true) {
+		t.Fatal("detached event lost its native identity, dates or read-only participation")
+	}
+	detail.Children = append(detail.Children, detail.Children[0])
+	if _, err := appointmentDetailForRow(row, detail); !errors.Is(err, core.ErrUnsupported) {
+		t.Fatalf("ambiguous masterless item returned %v", err)
+	}
+}

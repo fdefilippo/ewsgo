@@ -4,11 +4,13 @@
 package sqlite
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"ewsgo/internal/core"
 )
@@ -97,6 +99,41 @@ func TestConcurrentBinding(t *testing.T) {
 	}
 }
 
+func TestKnownMailboxBindingWhileAnotherTransactionOwnsWriter(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "concurrent-read.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	scope := core.Scope{Backend: "fixture", Account: "known"}
+	want, err := store.BindMailbox(ctx, scope, "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+
+	completed := make(chan bool, 1)
+	go func() {
+		identity, err := store.BindMailbox(ctx, scope, "primary")
+		completed <- err == nil && identity == want
+	}()
+	timeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	select {
+	case ok := <-completed:
+		if !ok {
+			t.Fatal("read did not resolve the existing identity")
+		}
+	case <-timeout.Done():
+		t.Fatal("read waited for the writer")
+	}
+}
+
 func TestSchemaVersionAndConnectionSettings(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "versioned.sqlite")
@@ -177,6 +214,7 @@ func TestOpenMigratesVersionOneAndPreservesBindings(t *testing.T) {
 		DROP TABLE native_bindings;
 		DROP TABLE mapi_spooler;
 		DROP TABLE mapi_public_read_state;
+		DROP TABLE mapi_permission_members;
 		PRAGMA user_version = 1;
 	`); err != nil {
 		t.Fatal(err)

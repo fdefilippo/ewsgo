@@ -44,7 +44,7 @@ func (m *mailbox) ListAppointments(ctx context.Context, folder core.ID) ([]core.
 
 func (m *mailbox) GetCalendarAppointment(ctx context.Context, folder, id core.ID) (core.Appointment, error) {
 	native, ok := strings.CutPrefix(string(id), core.AppointmentIDPrefix)
-	if !ok {
+	if !ok || native == "" {
 		return core.Appointment{}, core.ErrNotFound
 	}
 	rows, err := m.readCalendarSearchItems(ctx, folder, core.CalendarFolder, native)
@@ -119,8 +119,12 @@ func appointmentDetailForRow(row core.Object, detail node) (core.Appointment, er
 		}
 	}
 	invite, comp := appointmentInvite(detail, func(comp node) bool { return comp.get("ex") != "1" })
-	if comp == nil {
-		return core.Appointment{}, core.ErrUnsupported
+	detached := comp == nil
+	if detached {
+		invite, comp = detachedAppointmentComponent(detail)
+		if comp == nil {
+			return core.Appointment{}, core.ErrUnsupported
+		}
 	}
 	item, err := appointmentFromComponent(detail, *comp, identity)
 	if err != nil {
@@ -129,14 +133,24 @@ func appointmentDetailForRow(row core.Object, detail node) (core.Appointment, er
 	if core.Bool(item.Type == core.AppointmentMaster) != row.Properties[core.AppointmentRecurring] {
 		return core.Appointment{}, core.ErrConflict
 	}
-	switch comp.get("isOrg") {
-	case "1":
-		item.Participation = core.AppointmentPersonal
-		if comp.child(mailNS, "at") != nil {
-			item.Participation = core.AppointmentOrganized
+	if detached {
+		// A recipient can have one exception without the series. Preserve its
+		// native identity and actual dates as a standalone read-only event.
+		item.OriginalStart, err = recurrenceStart(exceptionRecurrenceID(*comp))
+		if err != nil {
+			return core.Appointment{}, err
 		}
-	case "0":
 		item.Participation = core.AppointmentReceived
+	} else {
+		switch comp.get("isOrg") {
+		case "1":
+			item.Participation = core.AppointmentPersonal
+			if comp.child(mailNS, "at") != nil {
+				item.Participation = core.AppointmentOrganized
+			}
+		case "0":
+			item.Participation = core.AppointmentReceived
+		}
 	}
 	if item.AllDay {
 		item.StartZone = &core.AppointmentZone{Name: "UTC"}
@@ -149,4 +163,26 @@ func appointmentDetailForRow(row core.Object, detail node) (core.Appointment, er
 		item.SeriesSchedule = appointmentSeriesSchedule(detail, *comp, item)
 	}
 	return item, nil
+}
+
+// Only the single-exception form makes a standalone object unambiguous.
+func detachedAppointmentComponent(detail node) (node, *node) {
+	var invite node
+	var component *node
+	for _, child := range detail.Children {
+		if child.XMLName != (xml.Name{Space: mailNS, Local: "inv"}) {
+			continue
+		}
+		for i := range child.Children {
+			comp := &child.Children[i]
+			if comp.XMLName != (xml.Name{Space: mailNS, Local: "comp"}) {
+				continue
+			}
+			if component != nil || comp.get("ex") != "1" || comp.child(mailNS, "recur") != nil {
+				return node{}, nil
+			}
+			invite, component = child, comp
+		}
+	}
+	return invite, component
 }

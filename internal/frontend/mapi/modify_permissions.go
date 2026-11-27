@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"time"
 
 	"ewsgo/internal/core"
@@ -187,12 +188,17 @@ func (t *SessionTransport) modifyPermissions(ctx context.Context, session core.S
 		return result(0)
 	}
 	change := request.rows[0]
-	scope := store.permissionMemberScope(change.memberID)
+	var scope core.Scope
 	if change.operation == permissionAdd {
 		id := change.entryID[len(mailUserEntryIDHeader) : len(change.entryID)-1]
 		scope, code = t.permissionEntryScope(ctx, session, id)
 		if code != 0 {
 			return result(code)
+		}
+	} else {
+		scope, err = store.permissionMemberScope(ctx, change.memberID)
+		if err != nil {
+			return result(storeError(err))
 		}
 	}
 	var previous core.AccessGrant
@@ -233,15 +239,25 @@ func (t *SessionTransport) modifyPermissions(ctx context.Context, session core.S
 	return result(permissionWriteCode(err))
 }
 
-func (s *ramStore) permissionMemberScope(id uint64) core.Scope {
+func (s *ramStore) permissionMemberScope(ctx context.Context, id uint64) (core.Scope, error) {
+	if s.durable.store != nil {
+		account, err := s.durable.store.MAPIPermissionMember(ctx, s.durable.mailbox, id)
+		if errors.Is(err, core.ErrNotFound) {
+			return core.Scope{}, nil
+		}
+		if err != nil {
+			return core.Scope{}, err
+		}
+		return core.Scope{Backend: s.scope.Backend, Account: account}, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for scope, member := range s.permissionMembers {
 		if member == id {
-			return scope
+			return scope, nil
 		}
 	}
-	return core.Scope{}
+	return core.Scope{}, nil
 }
 
 func (t *SessionTransport) permissionEntryScope(ctx context.Context, session core.Session, dn []byte) (core.Scope, uint32) {

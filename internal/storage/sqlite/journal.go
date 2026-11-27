@@ -200,6 +200,7 @@ func updateNativeBinding(ctx context.Context, tx *sql.Tx, mailboxID string, even
 	return nil
 }
 
+// Retired bindings retain published identities independently of journal rows.
 // ResolveNativeBinding looks up a live persisted mapping. A caller can use a
 // provably derivable logical identity directly without creating a binding.
 func (s *Store) ResolveNativeBinding(ctx context.Context, mailboxID string, binding NativeBinding) (core.ID, error) {

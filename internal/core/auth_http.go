@@ -20,9 +20,9 @@ func BasicTLS(auth Authenticator, next func(http.ResponseWriter, *http.Request, 
 			return
 		}
 		user, password, ok := r.BasicAuth()
-		if !ok || user == "" || len(user) > 1024 || len(password) > 1024 {
+		if !ok || user == "" || password == "" || len(user) > 1024 || len(password) > 1024 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="EWSGo", charset="UTF-8"`)
-			http.Error(w, "authentication required", 401)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
 		started := time.Now()
@@ -57,35 +57,63 @@ func BasicTLS(auth Authenticator, next func(http.ResponseWriter, *http.Request, 
 // AuthenticationFailureDiagnostic contains only enum values, never errors,
 // credentials or backend details. A receiver is installed only by lab tracing.
 type AuthenticationFailureDiagnostic struct {
-	failure, requestContext byte
+	failure        authenticationFailureCode
+	requestContext authenticationRequestState
 }
 
+type authenticationFailureCode uint8
+
+const (
+	authFailureNone authenticationFailureCode = iota
+	authFailureAuthentication
+	authFailureDenied
+	authFailureCanceled
+	authFailureDeadline
+	authFailureOther
+)
+
+type authenticationRequestState uint8
+
+const (
+	authRequestNone authenticationRequestState = iota
+	authRequestActive
+	authRequestCanceled
+	authRequestDeadline
+	authRequestOther
+)
+
 func authenticationFailure(err, requestErr error) AuthenticationFailureDiagnostic {
-	d := AuthenticationFailureDiagnostic{failure: 5, requestContext: 1}
+	d := AuthenticationFailureDiagnostic{failure: authFailureOther, requestContext: authRequestActive}
 	switch {
 	case errors.Is(err, ErrAuthentication):
-		d.failure = 1
+		d.failure = authFailureAuthentication
 	case errors.Is(err, ErrAccessDenied):
-		d.failure = 2
+		d.failure = authFailureDenied
 	case errors.Is(err, context.Canceled):
-		d.failure = 3
+		d.failure = authFailureCanceled
 	case errors.Is(err, context.DeadlineExceeded):
-		d.failure = 4
+		d.failure = authFailureDeadline
 	}
 	switch {
 	case errors.Is(requestErr, context.Canceled):
-		d.requestContext = 2
+		d.requestContext = authRequestCanceled
 	case errors.Is(requestErr, context.DeadlineExceeded):
-		d.requestContext = 3
+		d.requestContext = authRequestDeadline
 	case requestErr != nil:
-		d.requestContext = 4
+		d.requestContext = authRequestOther
 	}
 	return d
 }
 
 func (d AuthenticationFailureDiagnostic) Fields() (failure, requestContext string) {
-	failures := [...]string{"none", "authentication", "access_denied", "canceled", "deadline_exceeded", "other"}
-	contexts := [...]string{"none", "active", "canceled", "deadline_exceeded", "other"}
+	failures := [...]string{
+		authFailureNone: "none", authFailureAuthentication: "authentication", authFailureDenied: "access_denied",
+		authFailureCanceled: "canceled", authFailureDeadline: "deadline_exceeded", authFailureOther: "other",
+	}
+	contexts := [...]string{
+		authRequestNone: "none", authRequestActive: "active", authRequestCanceled: "canceled",
+		authRequestDeadline: "deadline_exceeded", authRequestOther: "other",
+	}
 	if int(d.failure) >= len(failures) || int(d.requestContext) >= len(contexts) {
 		return "other", "other"
 	}

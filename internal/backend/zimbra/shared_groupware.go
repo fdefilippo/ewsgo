@@ -150,15 +150,15 @@ func (m *mailbox) observeSharedFolderContents(ctx context.Context, folder core.I
 		role = core.CalendarFolder
 	}
 	remote := link.get("zid") + ":" + link.get("rid")
-	before, err := m.sharedContentsSequence(ctx, remote, link.get("view"))
+	before, err := m.sharedContentsMarker(ctx, remote, link.get("view"))
 	if err != nil {
 		return core.MailFolderObservation{}, err
 	}
-	ids, err := m.folderContentsIDs(ctx, folder, "", role)
+	ids, err := m.folderContentsIDs(ctx, folder, role)
 	if err != nil {
 		return core.MailFolderObservation{}, err
 	}
-	after, err := m.sharedContentsSequence(ctx, remote, link.get("view"))
+	after, err := m.sharedContentsMarker(ctx, remote, link.get("view"))
 	if err != nil {
 		return core.MailFolderObservation{}, err
 	}
@@ -172,32 +172,43 @@ func (m *mailbox) observeSharedFolderContents(ctx context.Context, folder core.I
 	}
 	// The remote folder's total can include private appointments. Count the
 	// items returned through the delegate's current access instead.
-	return core.MailFolderObservation{Sequence: after, MessageCount: uint64(len(ids)), MessageIDs: ids}, nil
+	return core.MailFolderObservation{Sequence: after.Sequence, MessageCount: uint64(len(ids)), MessageIDs: ids}, nil
 }
 
-func (m *mailbox) sharedContentsSequence(ctx context.Context, remote, view string) (uint64, error) {
+func (m *mailbox) sharedContentsMarker(ctx context.Context, remote, view string) (core.MailFolderMarker, error) {
 	out, err := m.getLocalGroupwareFolders(ctx, remote, "0")
 	if err != nil {
-		return 0, err
+		return core.MailFolderMarker{}, err
 	}
 	if out.XMLName != (xml.Name{Space: mailNS, Local: "GetFolderResponse"}) || len(out.Children) != 1 {
-		return 0, ErrProtocol
+		return core.MailFolderMarker{}, ErrProtocol
 	}
 	item := out.Children[0]
 	if item.XMLName != (xml.Name{Space: mailNS, Local: "folder"}) || item.get("id") != remote || item.get("view") != view {
-		return 0, ErrProtocol
+		return core.MailFolderMarker{}, ErrProtocol
 	}
 	if !strings.ContainsRune(item.get("perm"), 'r') {
-		return 0, core.ErrAccessDenied
+		return core.MailFolderMarker{}, core.ErrAccessDenied
 	}
 	sequence, err := optionalFolderNumber(item, "i4ms")
 	if err != nil {
-		return 0, err
+		return core.MailFolderMarker{}, err
 	}
 	if sequence == nil {
-		return 0, core.ErrUnsupported
+		return core.MailFolderMarker{}, core.ErrUnsupported
 	}
-	return *sequence, ctx.Err()
+	marker := core.MailFolderMarker{Sequence: *sequence}
+	if view == "appointment" {
+		count, err := optionalFolderNumber(item, "n")
+		if err != nil {
+			return core.MailFolderMarker{}, err
+		}
+		if count == nil {
+			return core.MailFolderMarker{}, core.ErrUnsupported
+		}
+		marker.MessageCount = *count
+	}
+	return marker, ctx.Err()
 }
 
 func (m *mailbox) GroupwareFolderTree(ctx context.Context, roles []core.SpecialFolderKind) ([]core.Object, error) {

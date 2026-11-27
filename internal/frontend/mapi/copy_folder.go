@@ -67,8 +67,6 @@ func copyStoreFolder(ctx context.Context, session core.Session, objects *mailbox
 		return folderPlacementResponse(op, 0x8004010b, false) // Busy.
 	}
 	s := source.binding.store
-	s.hierarchyMu.Lock()
-	defer s.hierarchyMu.Unlock()
 	job, err := s.prepareFolderCopy(ctx, session, source.fid, destination.fid, request, name)
 	if err != nil {
 		return folderPlacementResponse(op, folderPlacementCode(err), false)
@@ -78,7 +76,7 @@ func copyStoreFolder(ctx context.Context, session core.Session, objects *mailbox
 		if err != nil {
 			return folderPlacementResponse(op, storeError(err), false)
 		}
-		done, partial, err := s.advanceFolderCopy(ctx, session, job)
+		done, partial, err := s.advanceFolderCopyStep(ctx, session, job)
 		if done {
 			job.lease.release()
 			return folderPlacementResponse(op, folderPlacementCode(err), partial)
@@ -88,7 +86,7 @@ func copyStoreFolder(ctx context.Context, session core.Session, objects *mailbox
 		return folderCopyProgressResponse(op, job)
 	}
 	for {
-		done, partial, err := s.advanceFolderCopy(ctx, session, job)
+		done, partial, err := s.advanceFolderCopyStep(ctx, session, job)
 		if done {
 			return folderPlacementResponse(op, folderPlacementCode(err), partial)
 		}
@@ -181,11 +179,9 @@ func pollFolderCopy(ctx context.Context, session core.Session, objects *mailboxO
 	if err := hierarchyOwner(ctx, session.Mailbox()); err != nil {
 		return ropError(ropProgress, op.Input, storeError(err))
 	}
-	s.hierarchyMu.Lock()
-	defer s.hierarchyMu.Unlock()
 	code, partial := uint32(0x80040113), true // MAPI_E_USER_CANCEL.
 	if op.Flags == 0 {
-		done, partialCopy, err := s.advanceFolderCopy(ctx, session, job)
+		done, partialCopy, err := s.advanceFolderCopyStep(ctx, session, job)
 		if !done {
 			return folderCopyProgressResponse(op, job)
 		}
@@ -198,9 +194,11 @@ func pollFolderCopy(ctx context.Context, session core.Session, objects *mailboxO
 	return folderPlacementResponse(op, code, partial)
 }
 
-// The caller holds hierarchyMu. A step either confirms one folder and its
-// contents or returns the original CopyFolder result, including partial work.
-func (s *ramStore) advanceFolderCopy(ctx context.Context, session core.Session, job *folderCopyJob) (done, partial bool, err error) {
+// A step confirms one folder and its contents while holding the hierarchy
+// lock. Planning and the intervals between steps allow other mutations.
+func (s *ramStore) advanceFolderCopyStep(ctx context.Context, session core.Session, job *folderCopyJob) (done, partial bool, err error) {
+	s.hierarchyMu.Lock()
+	defer s.hierarchyMu.Unlock()
 	box := session.Mailbox()
 	folders, folderOK := box.(core.MailFolderHierarchyWriter)
 	messages, messageOK := box.(core.MailMessagePlacementWriter)
@@ -209,15 +207,20 @@ func (s *ramStore) advanceFolderCopy(ctx context.Context, session core.Session, 
 	}
 	entry := job.plan[job.completed]
 	parent, name := job.target, job.name
-	if job.completed != 0 {
+	if job.completed == 0 {
+		// Refresh the native destination and cycle check after planning.
+		reader, ok := box.(core.MailFolderCopyReader)
+		if !ok {
+			return true, false, core.ErrUnsupported
+		}
+		if _, err := reader.ReadMailFolderCopyTree(ctx, entry.folder.ID, job.target, false); err != nil {
+			return true, false, err
+		}
+	} else {
 		target := job.placed[entry.folder.Parent]
 		parent, name = target.id, string(entry.folder.Properties[core.DisplayName].(core.Text))
-		if job.lease != nil {
-			// A different client can change the destination between polls.
-			// Recheck the root and the next parent before resuming writes.
-			if !job.root.matches(ctx, box) || target.id != job.root.id && !target.matches(ctx, box) {
-				return true, true, core.ErrConflict
-			}
+		if !job.root.matches(ctx, box) || target.id != job.root.id && !target.matches(ctx, box) {
+			return true, true, core.ErrConflict
 		}
 	}
 	created, err := s.copyFolderEntry(ctx, session, folders, messages, entry, parent, name)

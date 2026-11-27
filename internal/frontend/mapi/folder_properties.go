@@ -60,6 +60,17 @@ func specificPropertiesMetadataBound(request specificProperties, ostMaximum int,
 	return specificPropertiesObjectBound(request, ostMaximum, metadata, false)
 }
 
+func specificPropertiesSlotBound(request specificProperties, ostMaximum int, metadata *metadataBatchView, folder, message bool) int {
+	if !message {
+		return specificPropertiesObjectBound(request, ostMaximum, metadata, false)
+	}
+	bound := specificPropertiesObjectBound(request, ostMaximum, metadata, true)
+	if folder {
+		bound = max(bound, specificPropertiesObjectBound(request, ostMaximum, metadata, false))
+	}
+	return bound
+}
+
 func specificPropertiesObjectBound(request specificProperties, ostMaximum int, metadata *metadataBatchView, message bool) int {
 	n := 7 // ROP header and PropertyRow flag.
 	for _, tag := range request.tags {

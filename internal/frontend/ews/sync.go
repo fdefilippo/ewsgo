@@ -91,6 +91,8 @@ func syncError(op string, err error) []node {
 		code = "ErrorFolderNotFound"
 	case errors.Is(err, core.ErrUnsupported):
 		code = "ErrorInvalidPropertyForOperation"
+	case errors.Is(err, core.ErrLimit):
+		code = "ErrorDataSizeLimitExceeded"
 	case errors.Is(err, core.ErrInvalid):
 		code = "ErrorInvalidRequest"
 	}
@@ -138,7 +140,7 @@ func (h *Handler) syncHierarchy(r *http.Request, op node, s core.Session, shape 
 			return syncError("SyncFolderHierarchy", err)
 		}
 		if page.More || len(page.Objects) > 1000 {
-			return syncError("SyncFolderHierarchy", core.ErrUnsupported)
+			return syncError("SyncFolderHierarchy", core.ErrLimit)
 		}
 		known := map[core.ID]string{}
 		for _, o := range page.Objects {
@@ -216,7 +218,10 @@ func (h *Handler) syncItems(r *http.Request, op node, s core.Session, shape resp
 		if err != nil {
 			return syncError("SyncFolderItems", err)
 		}
-		if len(page.Objects)+len(page.Deleted) > 2000 || page.Next == "" || page.More && page.Next == state.native {
+		if len(page.Objects)+len(page.Deleted) > 2000 {
+			return syncError("SyncFolderItems", core.ErrLimit)
+		}
+		if page.Next == "" || page.More && page.Next == state.native {
 			return syncError("SyncFolderItems", core.ErrResync)
 		}
 		state.native = page.Next
@@ -234,7 +239,7 @@ func (h *Handler) syncItems(r *http.Request, op node, s core.Session, shape resp
 			state.pending = append(state.pending, syncChange{kind: "Delete", deleted: id})
 		}
 		if len(state.known) > 2000 {
-			return syncError("SyncFolderItems", core.ErrUnsupported)
+			return syncError("SyncFolderItems", core.ErrLimit)
 		}
 	}
 	n := min(limit, len(state.pending))

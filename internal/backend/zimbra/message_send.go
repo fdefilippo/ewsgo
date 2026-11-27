@@ -82,13 +82,20 @@ func (s *Session) sendUploadedMIME(ctx context.Context, upload, uid string) (cor
 	// did would delete the draft without a revision precondition.
 	message := attr(element(mailNS, "m", ""), "aid", upload)
 	request := attr(attr(element(mailNS, "SendMsgRequest", "", message), "suid", uid), "noSave", "0")
-	response, err := s.request(ctx, mailNS, "SendMsg", "", request)
+	response, err := s.requestMutation(ctx, mailNS, "SendMsg", "", request)
 	if err != nil {
+		if errors.Is(err, core.ErrWriteNotDispatched) {
+			return "", errors.Join(core.ErrSendRetryable, err)
+		}
 		var fault *Fault
 		if errors.As(err, &fault) {
 			switch fault.Code {
-			case "mail.NO_SUCH_UPLOAD", "mail.MESSAGE_PARSE_ERROR", "account.AUTH_FAILED", "service.AUTH_REQUIRED", "service.AUTH_EXPIRED":
-				return "", core.ErrSendRejected
+			case "mail.NO_SUCH_UPLOAD", "account.AUTH_FAILED", "service.AUTH_REQUIRED", "service.AUTH_EXPIRED":
+				// These faults occur before SMTP submission. Staging again
+				// uploads fresh MIME under the authenticated session.
+				return "", errors.Join(core.ErrSendRetryable, semanticError(err))
+			case "mail.MESSAGE_PARSE_ERROR":
+				return "", errors.Join(core.ErrSendRejected, err)
 			}
 		}
 		return "", err

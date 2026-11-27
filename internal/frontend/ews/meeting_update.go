@@ -56,7 +56,7 @@ func (h *Handler) updateMeeting(ctx context.Context, session core.Session, ref r
 		if current.Identity.ID != ref.ID || current.Identity.Parent != ref.Parent || current.Identity.Kind != core.AppointmentItem {
 			return nil, core.ErrNotFound
 		}
-		if h.appointmentChangeKey(scope, current) != priorKey {
+		if h.changeKey(scope, current.Identity) != priorKey {
 			return nil, core.ErrConflict
 		}
 		if current.Type != core.AppointmentSingle || current.AllDay || current.Cancelled {

@@ -25,6 +25,49 @@ type spooledDraft struct {
 	owner uint32 // Local to the live, registered spooler logon.
 }
 
+type draftSendRecovery interface {
+	RecoverDraftSend(context.Context, core.Session, core.ID, core.Revision) (core.SendState, error)
+}
+
+// Recovery and submission use the same lock. A persisted Dispatching entry
+// with no local owner belongs to an interrupted or completed attempt.
+func (t *SessionTransport) recoverSpoolerDispatches(ctx context.Context, session core.Session, s *ramStore, mid, folder uint64) error {
+	recovery, ok := t.mailDraftSender.(draftSendRecovery)
+	if !ok || !s.spoolerMu.TryLock() {
+		return nil
+	}
+	defer s.spoolerMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for candidate, entry := range s.spoolerQueue {
+		if entry.State != mapireplica.SpoolerDispatching || entry.owner != 0 ||
+			mid != 0 && candidate != mid || folder != 0 && folderID(entry.Folder) != folder {
+			continue
+		}
+		state, err := recovery.RecoverDraftSend(ctx, session, s.byMID[candidate].id, entry.Revision)
+		if err != nil {
+			return err
+		}
+		switch state {
+		case core.SendReady:
+			entry.State = mapireplica.SpoolerQueued
+			if err := s.writeSpoolerLocked(ctx, entry); err != nil {
+				return err
+			}
+		case core.SendConfirmed, core.SendFailed, core.SendUncertain:
+			// The correlated receipt remains in the send registry and guards
+			// the exact native revision after we release the queue slot.
+			if err := s.advanceReplicaLocked(ctx, mapireplica.Mutation{ResolveSpooler: entry.Counter}); err != nil {
+				return err
+			}
+			delete(s.spoolerQueue, candidate)
+		default:
+			return core.ErrInvalid
+		}
+	}
+	return nil
+}
+
 func (s *ramStore) loadSpoolerQueue(entries []mapireplica.SpoolerEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -95,6 +138,15 @@ func (t *SessionTransport) executeSpoolerQueue(ctx context.Context, session core
 	}
 	if op.ID == ropSpoolerLockMessage && op.Flags > spoolerFinished {
 		return reply(0x80070057)
+	}
+	if op.SubmissionMID != 0 && (op.ID != ropAbortSubmit || op.Folder != 0) {
+		var folder uint64
+		if op.ID == ropAbortSubmit {
+			folder = op.Folder
+		}
+		if err := t.recoverSpoolerDispatches(ctx, session, s, op.SubmissionMID, folder); err != nil {
+			return reply(storeError(err))
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,15 +268,19 @@ func (d *mailDraft) claimSpoolerDispatch(ctx context.Context, owner uint32) (map
 }
 
 func (d *mailDraft) recordSpoolerDispatch(ctx context.Context, submitErr error) error {
-	if errors.Is(submitErr, core.ErrOutcomeUnknown) {
-		return submitErr // Sending is durable and never retried after an indeterminate SOAP outcome.
-	}
 	s := d.store
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.spoolerQueue[d.mid]
 	if entry.State != mapireplica.SpoolerDispatching {
 		return errors.Join(core.ErrOutcomeUnknown, submitErr)
+	}
+	if errors.Is(submitErr, core.ErrOutcomeUnknown) || errors.Is(submitErr, core.ErrSendRejected) {
+		// The next spooler operation can recover this completed attempt
+		// without waiting for the sending logon to disconnect.
+		entry.owner = 0
+		s.spoolerQueue[d.mid] = entry
+		return submitErr
 	}
 	entry.State = mapireplica.SpoolerAccepted
 	if submitErr != nil {
@@ -233,6 +289,11 @@ func (d *mailDraft) recordSpoolerDispatch(ctx context.Context, submitErr error) 
 	commit, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := s.writeSpoolerLocked(commit, entry); err != nil {
+		// This attempt has ended. Reconcile the still-persisted Dispatching
+		// state on the next spooler operation even if the logon stays open.
+		previous := s.spoolerQueue[d.mid]
+		previous.owner = 0
+		s.spoolerQueue[d.mid] = previous
 		return errors.Join(core.ErrOutcomeUnknown, submitErr, err)
 	}
 	return submitErr

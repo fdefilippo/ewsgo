@@ -6,12 +6,24 @@ package mapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"testing"
 
 	"ewsgo/internal/core"
 	"ewsgo/internal/mapireplica"
+	"ewsgo/internal/storage/sqlite"
 )
+
+type spoolerRecoveryFixture struct {
+	outboxSendFunc
+	db      *sqlite.Store
+	mailbox string
+}
+
+func (f spoolerRecoveryFixture) RecoverDraftSend(ctx context.Context, _ core.Session, draft core.ID, revision core.Revision) (core.SendState, error) {
+	return f.db.RecoverCorrelatedDraftSend(ctx, f.mailbox, draft, revision, core.DraftSendKey(draft, revision))
+}
 
 func TestDurableSpoolerQueueLifecycle(t *testing.T) {
 	f, mailbox := messageFixture(t)
@@ -24,6 +36,7 @@ func TestDurableSpoolerQueueLifecycle(t *testing.T) {
 		Properties: core.Properties{core.DisplayName: core.Text("Drafts"), core.WellKnown: core.Text("drafts")},
 	})
 	item := messageTestObject("spool-draft", nativeFolder)
+	item.MIME = []byte("From: lab@example.invalid\r\nTo: synthetic@example.invalid\r\n\r\nFixture\r\n")
 	item.Properties[core.IsDraft] = core.Bool(true)
 	item.Properties[core.ContentRevision] = core.Integer(item.Revision)
 	box := &outboxPlacementFixture{messageFixtureMailbox: mailbox}
@@ -95,10 +108,10 @@ func TestDurableSpoolerQueueLifecycle(t *testing.T) {
 	spoolCtx := t.Context()
 	lock := Operation{ID: ropSpoolerLockMessage, SubmissionMID: mid}
 	check(transport.executeSpoolerQueue(ctx, f.session, spooler, lock, spoolerHandles), accessDenied)
-	check(executeSpooler(ctx, f.session, spooler, Operation{ID: ropSetSpooler}, spoolerHandles), 0)
+	check(transport.executeSpooler(ctx, f.session, spooler, Operation{ID: ropSetSpooler}, spoolerHandles), 0)
 	check(transport.executeSpoolerQueue(ctx, f.session, spooler, lock, spoolerHandles), 0)
 	check(transport.executeSpoolerQueue(ctx, f.session, ordinary, abort, ordinaryHandles), unableToAbort)
-	check(executeSpooler(ctx, f.session, ordinary, Operation{ID: ropSetSpooler}, ordinaryHandles), 0)
+	check(transport.executeSpooler(ctx, f.session, ordinary, Operation{ID: ropSetSpooler}, ordinaryHandles), 0)
 	check(transport.executeSpoolerQueue(ctx, f.session, ordinary, lock, ordinaryHandles), unableToAbort)
 	spooler.release(spoolerHandles[0])
 	check(transport.executeSpoolerQueue(ctx, f.session, ordinary, abort, ordinaryHandles), 0)
@@ -138,10 +151,76 @@ func TestDurableSpoolerQueueLifecycle(t *testing.T) {
 	if f.store.spoolerQueue[mid].State != mapireplica.SpoolerDispatching {
 		t.Fatal("indeterminate attempt lost across restart")
 	}
-	check(executeSpooler(ctx, f.session, ordinary, Operation{ID: ropSetSpooler}, ordinaryHandles), 0)
+	check(transport.executeSpooler(ctx, f.session, ordinary, Operation{ID: ropSetSpooler}, ordinaryHandles), 0)
 	check(transport.executeSpoolerQueue(ctx, f.session, ordinary, lock, ordinaryHandles), unableToAbort)
 	check(transport.executeSpoolerQueue(ctx, f.session, ordinary, abort, ordinaryHandles), unableToAbort)
 	if submissions != 2 {
 		t.Fatalf("%d native sends after uncertain result", submissions)
+	}
+
+	db := reopen()
+	sender := spoolerRecoveryFixture{db: db, mailbox: f.store.durable.mailbox,
+		outboxSendFunc: func(core.Object) (core.SendObservation, error) {
+			t.Fatal("recovery dispatched a draft")
+			return core.SendObservation{}, core.ErrUnsupported
+		},
+	}
+	transport.EnableMailDraftSending(sender)
+	ordinary, ordinaryHandles = connect()
+	check(transport.executeSpooler(ctx, f.session, ordinary, Operation{ID: ropSetSpooler}, ordinaryHandles), 0)
+	if f.store.isQueuedSubmission(mid) {
+		t.Fatal("legacy Dispatching entry without a receipt retained its queue slot")
+	}
+	for _, tc := range []struct {
+		name   string
+		state  core.SendState
+		queued bool
+	}{
+		{name: "safe retry", state: core.SendReady, queued: true},
+		{name: "positive SOAP", state: core.SendConfirmed},
+		{name: "terminal rejection", state: core.SendFailed},
+		{name: "lost SOAP reply", state: core.SendUncertain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item.Revision++
+			box.objects[0] = item
+			ordinary, ordinaryHandles := connect()
+			check(transport.executeSubmission(ctx, f.session, ordinary, submit, ordinaryHandles), 0)
+			check(transport.executeSpooler(ctx, f.session, ordinary, Operation{ID: ropSetSpooler}, ordinaryHandles), 0)
+			check(transport.executeSpoolerQueue(ctx, f.session, ordinary, lock, ordinaryHandles), 0)
+			draft := ordinary.objects[ordinaryHandles[1]].message.mailDraft
+			if _, err := draft.claimSpoolerDispatch(ctx, ordinaryHandles[0]); err != nil {
+				t.Fatal(err)
+			}
+			// Simulate interruption before the queue can record the outcome.
+			input := core.SendInput{DraftID: item.ID, Revision: item.Revision, MIMEDigest: sha256.Sum256(item.MIME)}
+			intent, err := db.PrepareCorrelatedSend(ctx, sender.mailbox, input, core.DraftSendKey(item.ID, item.Revision))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, claimed, err := db.ClaimSend(ctx, sender.mailbox, intent.ID, input); !claimed || err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+			if tc.state != core.SendUncertain {
+				if err := db.CompleteSend(ctx, sender.mailbox, intent.ID, tc.state, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db = reopen()
+			sender.db = db
+			transport.EnableMailDraftSending(sender)
+			ordinary, ordinaryHandles = connect()
+			check(transport.executeSpooler(ctx, f.session, ordinary, Operation{ID: ropSetSpooler}, ordinaryHandles), 0)
+			if got := f.store.isQueuedSubmission(mid); got != tc.queued {
+				t.Fatalf("queued=%v, want %v", got, tc.queued)
+			}
+			if tc.queued {
+				check(transport.executeSpoolerQueue(ctx, f.session, ordinary, abort, ordinaryHandles), 0)
+				return
+			}
+			if stored, err := db.SendIntent(ctx, sender.mailbox, intent.ID); err != nil || stored.State != tc.state {
+				t.Fatalf("receipt lost after recovery: %v, %v", stored.State, err)
+			}
+		})
 	}
 }

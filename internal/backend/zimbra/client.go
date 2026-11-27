@@ -16,11 +16,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -236,6 +239,35 @@ func (c *Client) call(ctx context.Context, ns, operation, token, mailbox string,
 	return body, err
 }
 
+func validXMLContent(n node) bool {
+	if !validXMLText(n.Text) {
+		return false
+	}
+	for _, attribute := range n.Attrs {
+		if !validXMLText(attribute.Value) {
+			return false
+		}
+	}
+	for _, child := range n.Children {
+		if !validXMLContent(child) {
+			return false
+		}
+	}
+	return true
+}
+
+func validXMLText(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' || r == 0xfffe || r == 0xffff {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Client) callWithResponseContext(ctx context.Context, ns, operation, token, mailbox string, request node, contextElements ...node) (out node, responseContext *node, callErr error) {
 	started := time.Now()
 	defer func() {
@@ -250,6 +282,9 @@ func (c *Client) callWithResponseContext(ctx context.Context, ns, operation, tok
 	}
 	header.Children = append(header.Children, contextElements...)
 	envelope := element(soapNS, "Envelope", "", element(soapNS, "Header", "", header), element(soapNS, "Body", "", request))
+	if !validXMLContent(envelope) {
+		return node{}, nil, core.ErrInvalid
+	}
 	data, err := xml.Marshal(envelope)
 	if err != nil {
 		return node{}, nil, ErrProtocol
@@ -341,6 +376,28 @@ func (s *Session) request(ctx context.Context, ns, op, mailbox string, n node, c
 		return node{}, err
 	}
 	return s.client.call(ctx, ns, op, token, mailbox, n, contextElements...)
+}
+
+func (s *Session) requestMutation(ctx context.Context, ns, op, mailbox string, n node) (node, error) {
+	token, err := s.credential()
+	if err != nil {
+		return node{}, errors.Join(core.ErrWriteNotDispatched, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return node{}, errors.Join(core.ErrWriteNotDispatched, err)
+	}
+	// The standard transport cannot write the SOAP request before GotConn.
+	// Once a connection has been acquired, treat transport failure as ambiguous.
+	if _, ok := s.client.http.Transport.(*http.Transport); !ok {
+		return s.client.call(ctx, ns, op, token, mailbox, n)
+	}
+	var connected atomic.Bool
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
+	response, err := s.client.call(httptrace.WithClientTrace(ctx, trace), ns, op, token, mailbox, n)
+	if err != nil && !connected.Load() {
+		err = errors.Join(core.ErrWriteNotDispatched, err)
+	}
+	return response, err
 }
 
 // Validate asks Zimbra to validate this exact token, even after Logout. This is

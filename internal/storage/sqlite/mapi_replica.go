@@ -140,7 +140,7 @@ func loadMAPIObjectIDs(ctx context.Context, tx *sql.Tx, mailboxID string, highWa
 	rows, err := tx.QueryContext(ctx, `
 		SELECT namespace, object_key, counter FROM mapi_object_ids
 		WHERE mailbox_id = ? ORDER BY counter LIMIT ?
-	`, mailboxID, maxMAPIObjectID+1)
+	`, mailboxID, mapireplica.MaxBindings+1)
 	if err != nil {
 		return nil, fmt.Errorf("read MAPI object IDs: %w", err)
 	}
@@ -159,7 +159,7 @@ func loadMAPIObjectIDs(ctx context.Context, tx *sql.Tx, mailboxID string, highWa
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate MAPI object IDs: %w", err)
 	}
-	if len(mappings) > maxMAPIObjectID {
+	if len(mappings) > mapireplica.MaxBindings {
 		return nil, core.ErrUnsupported
 	}
 	return mappings, nil
@@ -196,7 +196,7 @@ func (s *Store) CommitMAPIReplica(ctx context.Context, mailboxID string, expecte
 		bindingCount != 0 || len(mutation.Projection) != 0 || mutation.FAI != nil ||
 		len(mutation.Drafts)+len(mutation.ForgetDrafts)+len(mutation.FolderValues) != 0 ||
 		mutation.FolderCreation != nil || mutation.ForgetFolderCreation != 0 || mutation.ForeignReplica != ([16]byte{}) ||
-		mutation.Spooler != nil || mutation.ForgetSpooler != 0 ||
+		mutation.Spooler != nil || mutation.ForgetSpooler != 0 || mutation.ResolveSpooler != 0 ||
 		mutation.MessageMove != nil || mutation.CancelMessageMove != 0 || mutation.MessageImport != nil || mutation.ImportAction != 0) {
 		return core.ErrInvalid
 	}
@@ -335,7 +335,7 @@ func insertMAPIObjectIDs(ctx context.Context, tx *sql.Tx, mailboxID string, mapp
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM mapi_object_ids WHERE mailbox_id = ?", mailboxID).Scan(&count); err != nil {
 		return fmt.Errorf("count MAPI object IDs: %w", err)
 	}
-	if len(mappings) > maxMAPIObjectID-count {
+	if len(mappings) > mapireplica.MaxBindings-count {
 		return core.ErrUnsupported
 	}
 	for _, binding := range mappings {

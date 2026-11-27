@@ -22,8 +22,9 @@ sincronizzazione della posta con MailCraft CLI e l’accesso da Outlook classico
 LTSC 2021 in modalità online e cache. Le prove hanno coperto anche contatti e
 appuntamenti personali in Outlook, ed eventi ricorrenti e inviti via EWS.
 Restano da qualificare le scritture sulle ricorrenze e le operazioni sugli
-inviti da Outlook. Un problema noto riguarda la sincronizzazione di Cestini
-Zimbra grandi che contengono insieme posta ed elementi groupware.
+inviti da Outlook. Una prova successiva con Outlook in modalità cache ha
+verificato la sincronizzazione di 340 messaggi da un Cestino Zimbra contenente
+posta, contatti e appuntamenti.
 
 Il backend Zimbra include `ewsgo-rules` per le regole di Outlook, le cartelle
 di ricezione e le azioni differite. I sorgenti e la guida di installazione

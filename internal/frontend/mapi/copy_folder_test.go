@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"strconv"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"ewsgo/internal/core"
 )
@@ -18,6 +20,7 @@ type copyFolderMailbox struct {
 	core.MailMessagePlacementWriter
 	messages    map[core.ID]core.Object
 	subtree     []core.Object
+	observeHook func()
 	createError error
 	creates     int
 	copies      int
@@ -39,6 +42,9 @@ func (b *copyFolderMailbox) ReadMailFolderCopyTree(ctx context.Context, source, 
 }
 
 func (b *copyFolderMailbox) ObserveMailFolder(context.Context, core.ID, *uint64) (core.MailFolderObservation, error) {
+	if b.observeHook != nil {
+		b.observeHook()
+	}
 	if len(b.messages) == 0 {
 		return core.MailFolderObservation{}, nil
 	}
@@ -182,4 +188,50 @@ func TestCopyFolderPartialCompletion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCopyFolderPlanningDoesNotHoldHierarchyLock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newCreateFixture(t)
+		store := f.state.mailbox.objects[f.handles[1]].binding.store
+		started, resume := make(chan struct{}), make(chan struct{})
+		box := &copyFolderMailbox{
+			placementTestMailbox: &placementTestMailbox{stateMailbox: f.box},
+			observeHook: func() {
+				close(started)
+				<-resume
+			},
+		}
+		f.session = &testSession{box}
+		faiRunOK(t, f, folderOperation(f.fids[SentItems], 4, 0, 2))
+		wire := binary.LittleEndian.AppendUint64([]byte{ropCopyFolder, 4, 1, 2, 0, 0, 0}, f.fids[Inbox])
+		wire = append(wire, "Replica\x00"...)
+		result := make(chan []byte, 1)
+		go func() {
+			out, _ := f.run(wire)
+			result <- out
+		}()
+		<-started
+		start := time.Now()
+		if !store.hierarchyMu.TryLock() {
+			close(resume)
+			<-result
+			t.Fatal("folder scanning still blocks hierarchy mutations")
+		}
+		for i, entry := range box.page.Objects {
+			if entry.ID == store.inbox {
+				box.page.Objects[i].Properties = core.Properties{core.DisplayName: core.Text("New Inbox")}
+				break
+			}
+		}
+		store.hierarchyMu.Unlock()
+		mutationLatency := time.Since(start)
+		time.Sleep(time.Second) // Model one slow native read while copying.
+		close(resume)
+		out := <-result
+		if !bytes.Equal(out, append(ropError(ropCopyFolder, 1, folderPlacementCode(core.ErrNotFound)), 0)) || box.creates != 0 {
+			t.Fatalf("copy ignored changed source: %x, writes %d", out, box.creates)
+		}
+		t.Logf("hierarchy mutation completed in %v during a %v planning stall", mutationLatency, time.Since(start))
+	})
 }

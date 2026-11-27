@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"ewsgo/internal/core"
 )
 
 const fixtureToken = "synthetic-secret-token"
@@ -253,5 +255,43 @@ func TestRejectUnsafeOrigins(t *testing.T) {
 		if _, err := New(Config{Origin: origin}); err == nil {
 			t.Fatal("unsafe origin accepted")
 		}
+	}
+}
+
+func TestSOAPMutationPreservesValidXMLContent(t *testing.T) {
+	var calls atomic.Int32
+	value := "Giornata\tuno\r\ndue & tre — 世界"
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error("read SOAP:", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		root, err := parseXML(raw)
+		field := root.find(mailNS, "sample")
+		if err != nil || field == nil || field.Text != value || field.get("label") != value {
+			t.Error("SOAP text or attribute changed")
+		}
+		envelope(w, `<SampleResponse xmlns="urn:zimbraMail"/>`)
+	}, Config{})
+	s := &Session{client: c, token: fixtureToken, expires: time.Now().Add(time.Minute)}
+	for _, invalid := range []node{
+		element(mailNS, "sample", "before\x00after"),
+		attr(element(mailNS, "sample", ""), "label", "before\vafter"),
+		element(mailNS, "sample", "\xff"),
+	} {
+		n := element(mailNS, "SampleRequest", "", invalid)
+		if _, err := s.requestMutation(t.Context(), mailNS, "Sample", "", n); !errors.Is(err, core.ErrInvalid) || !errors.Is(err, core.ErrWriteNotDispatched) {
+			t.Fatalf("invalid XML returned %v", err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("invalid XML was dispatched")
+	}
+	n := element(mailNS, "SampleRequest", "", attr(element(mailNS, "sample", value), "label", value))
+	if _, err := s.requestMutation(t.Context(), mailNS, "Sample", "", n); err != nil || calls.Load() != 1 {
+		t.Fatalf("valid SOAP requests = %d, err = %v", calls.Load(), err)
 	}
 }

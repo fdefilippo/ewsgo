@@ -177,10 +177,11 @@ func (t *SessionTransport) awaitNotification(ctx context.Context, session core.S
 }
 
 func (t *SessionTransport) checkObjectNotifications(ctx context.Context, session core.Session, state *contextState) (bool, bool, <-chan struct{}, error) {
-	targets, sequence, retry := t.contexts.objectNotificationTargets(state)
+	targets, sequence, retry, release := t.contexts.objectNotificationTargets(state)
 	if len(targets) == 0 {
 		return false, retry, nil, nil
 	}
+	defer release()
 	// All logons on this transport share the authenticated mailbox store.
 	// Obtain the signal before scanning so a commit cannot be missed.
 	local := targets[0].store.localNotificationSignal()
@@ -215,13 +216,17 @@ func (t *SessionTransport) checkObjectNotifications(ctx context.Context, session
 	return false, retry, local, nil
 }
 
-func (s *contexts) objectNotificationTargets(state *contextState) ([]objectNotificationTarget, string, bool) {
+func (s *contexts) objectNotificationTargets(state *contextState) ([]objectNotificationTarget, string, bool, func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.entries[state.id] != state || state.busy || state.mailbox == nil {
-		return nil, "", state.busy
+		return nil, "", state.busy, nil
 	}
-	return state.mailbox.notificationTargets(), state.sequence, false
+	targets := state.mailbox.notificationTargets()
+	if len(targets) == 0 {
+		return nil, "", false, nil
+	}
+	return targets, state.sequence, false, targets[0].store.pinForScan()
 }
 
 func (s *contexts) noteObjectNotificationScan(state *contextState, sequence string, target objectNotificationTarget, result notificationScan, refreshed bool) bool {
@@ -250,27 +255,31 @@ type notificationTable struct {
 	aggregates bool
 }
 
-func (s *contexts) notificationTables(state *contextState) ([]notificationTable, string, bool) {
+func (s *contexts) notificationTables(state *contextState) ([]notificationTable, string, bool, func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.entries[state.id] != state || state.busy || state.mailbox == nil {
-		return nil, "", state.busy
+		return nil, "", state.busy, nil
 	}
 	var result []notificationTable
 	for handle, obj := range state.mailbox.objects {
-		if !obj.table.updating() || !obj.table.subscribed {
+		if obj.binding.store == nil || !obj.table.updating() || !obj.table.subscribed {
 			continue
 		}
 		result = append(result, notificationTable{handle, obj.binding, obj.fid, obj.table.flags, obj.table.hierarchy, slices.ContainsFunc(obj.table.columns, isFolderAggregateTag)})
 	}
-	return result, state.sequence, false
+	if len(result) == 0 {
+		return nil, "", false, nil
+	}
+	return result, state.sequence, false, result[0].binding.store.pinForScan()
 }
 
 func (t *SessionTransport) checkNotificationTables(ctx context.Context, session core.Session, state *contextState, after *uint32) (bool, bool) {
-	tables, sequence, retry := t.contexts.notificationTables(state)
+	tables, sequence, retry, release := t.contexts.notificationTables(state)
 	if len(tables) == 0 {
 		return false, retry
 	}
+	defer release()
 	sort.Slice(tables, func(i, j int) bool { return tables[i].handle < tables[j].handle })
 	next := sort.Search(len(tables), func(i int) bool { return tables[i].handle > *after })
 	scan, cancel := context.WithTimeout(ctx, probeTimeout)

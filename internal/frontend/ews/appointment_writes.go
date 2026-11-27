@@ -138,10 +138,12 @@ func parseAppointmentCreate(item node) (core.Appointment, error) {
 	if !seen["Start"] || !seen["End"] {
 		return core.Appointment{}, core.ErrInvalid
 	}
-	if endZone != "" && endZone != appointment.TimeZone {
-		return core.Appointment{}, core.ErrUnsupported
-	}
-	if appointment.Recurrence == nil && appointment.TimeZone != "" {
+	if appointment.Recurrence == nil {
+		if (appointment.TimeZone != "" && appointment.TimeZone != "UTC") || (endZone != "" && endZone != "UTC") {
+			return core.Appointment{}, core.ErrUnsupported
+		}
+		appointment.TimeZone = ""
+	} else if endZone != "" && endZone != appointment.TimeZone {
 		return core.Appointment{}, core.ErrUnsupported
 	}
 	if appointment.AllDay {
@@ -260,14 +262,10 @@ func (h *Handler) updateAppointment(ctx context.Context, s core.Session, ref ref
 		}
 		if overwrite && key != "" {
 			revision, err := h.decodeRef(scope, key)
-			series := current.SeriesID
-			if series == "" {
-				series = ref.ID
-			}
-			if err != nil || revision.ID != "revision:"+series {
+			if err != nil || revision.ID != "revision:"+ref.ID {
 				return failure(operation, "ErrorInvalidChangeKey")
 			}
-		} else if !overwrite && key != h.appointmentChangeKey(scope, current) {
+		} else if !overwrite && key != h.changeKey(scope, current.Identity) {
 			return failure(operation, "ErrorIrresolvableConflict")
 		}
 		normalized := patch
@@ -312,7 +310,7 @@ func (h *Handler) trashAppointment(ctx context.Context, s core.Session, ref refe
 	if appointment.Identity.ID != ref.ID || appointment.Identity.Parent != ref.Parent || appointment.Identity.Kind != core.AppointmentItem {
 		return failure(operation, "ErrorItemNotFound")
 	}
-	if key != "" && key != h.appointmentChangeKey(s.Identity().Scope, appointment) {
+	if key != "" && key != h.changeKey(s.Identity().Scope, appointment.Identity) {
 		return failure(operation, "ErrorIrresolvableConflict")
 	}
 	if err := writer.TrashAppointment(ctx, appointment); err != nil {

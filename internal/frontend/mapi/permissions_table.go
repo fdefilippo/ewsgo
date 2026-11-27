@@ -14,9 +14,10 @@ import (
 	"unicode/utf8"
 
 	"ewsgo/internal/core"
+	"ewsgo/internal/mapireplica"
 )
 
-const maxPermissionMembers = 1024
+const maxPermissionMembers = mapireplica.MaxPermissionMembers
 const permissionReadPeak = 8 << 20
 
 // A detached complete observation, not a cached authorization decision. Every
@@ -286,7 +287,7 @@ func (t *SessionTransport) capturePermissionsTable(ctx context.Context, session 
 	for _, r := range rows[2:] {
 		scopes = append(scopes, r.Scope)
 	}
-	ids, err := store.permissionMemberIDs(scopes)
+	ids, err := store.permissionMemberIDs(ctx, scopes)
 	if err != nil {
 		return fail(err)
 	}
@@ -313,14 +314,31 @@ func (t *SessionTransport) capturePermissionsTable(ctx context.Context, session 
 	return table, nil
 }
 
-func (s *ramStore) permissionMemberIDs(scopes []core.Scope) (map[core.Scope]uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	newKeys := map[core.Scope]bool{}
+func (s *ramStore) permissionMemberIDs(ctx context.Context, scopes []core.Scope) (map[core.Scope]uint64, error) {
 	for _, scope := range scopes {
 		if scope.Backend != s.scope.Backend || scope.Account == "" || !permissionText(scope.Account, 512) {
 			return nil, core.ErrInvalid
 		}
+	}
+	ids := make(map[core.Scope]uint64, len(scopes))
+	if s.durable.store != nil {
+		accounts := make([]string, len(scopes))
+		for i, scope := range scopes {
+			accounts[i] = scope.Account
+		}
+		members, err := s.durable.store.BindMAPIPermissionMembers(ctx, s.durable.mailbox, accounts)
+		if err != nil {
+			return nil, err
+		}
+		for _, scope := range scopes {
+			ids[scope] = members[scope.Account]
+		}
+		return ids, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	newKeys := map[core.Scope]bool{}
+	for _, scope := range scopes {
 		if s.permissionMembers[scope] == 0 {
 			newKeys[scope] = true
 		}
@@ -340,7 +358,6 @@ func (s *ramStore) permissionMemberIDs(scopes []core.Scope) (map[core.Scope]uint
 			s.permissionMembers = make(map[core.Scope]uint64)
 		}
 	}
-	ids := make(map[core.Scope]uint64, len(scopes))
 	for _, scope := range scopes {
 		if s.permissionMembers[scope] == 0 {
 			s.permissionMembers[scope] = uint64(len(s.permissionMembers) + 1)

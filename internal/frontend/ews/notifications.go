@@ -232,11 +232,19 @@ func (h *Handler) getEvents(ctx context.Context, op node, session core.Session, 
 }
 
 func (s pullSubscription) matches(entry sqlite.JournalEntry) bool {
-	if !s.events[entry.Kind] || (entry.ObjectKind != core.Folder && entry.ObjectKind != core.Message) || entry.Parent == "" {
+	parent := notificationParent(entry)
+	if !s.events[entry.Kind] || (entry.ObjectKind != core.Folder && entry.ObjectKind != core.Message) || parent == "" {
 		return false
 	}
-	return s.folders == nil || s.folders[entry.Parent] || s.folders[entry.PreviousParent] ||
+	return s.folders == nil || s.folders[parent] || (entry.Kind == core.Moved && s.folders[entry.PreviousParent]) ||
 		(entry.ObjectKind == core.Folder && s.folders[entry.ID])
+}
+
+func notificationParent(entry sqlite.JournalEntry) core.ID {
+	if entry.Kind == core.Deleted && entry.PreviousParent != "" {
+		return entry.PreviousParent
+	}
+	return entry.Parent
 }
 
 func (h *Handler) notificationEvent(id string, scope core.Scope, pos sqlite.JournalCursor, entry sqlite.JournalEntry) node {
@@ -251,11 +259,12 @@ func (h *Handler) notificationEvent(id string, scope core.Scope, pos sqlite.Jour
 		}
 		return at(el(types, name, ""), "Id", value)
 	}
+	parent := notificationParent(entry)
 	children := []node{
 		el(types, "Watermark", h.watermark(id, pos)),
 		el(types, "TimeStamp", entry.ObservedAt.Format(time.RFC3339Nano)),
-		objectID(entry.Parent, false),
-		at(el(types, "ParentFolderId", ""), "Id", h.encode(scope, entry.Parent)),
+		objectID(parent, false),
+		at(el(types, "ParentFolderId", ""), "Id", h.encode(scope, parent)),
 	}
 	if entry.Kind == core.Moved {
 		children = append(children, objectID(entry.PreviousParent, true),

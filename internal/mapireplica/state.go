@@ -13,6 +13,16 @@ import (
 	"ewsgo/internal/core"
 )
 
+// MaxBindings bounds a full persistent mailbox snapshot. Bindings survive
+// object removal so an old client ID can never identify a different object.
+const MaxBindings = 16_384
+
+const (
+	MaxPermissionMembers = 1024
+	MaxFAITombstones     = 1024
+	MaxFAITombstoneBytes = 1 << 20
+)
+
 type Store interface {
 	LoadMAPIReplica(ctx context.Context, mailboxID string) (Snapshot, error)
 	CommitMAPIReplica(ctx context.Context, mailboxID string, expected Version, mutation Mutation) error
@@ -21,6 +31,8 @@ type Store interface {
 	PublishMAPIContentsProof(ctx context.Context, mailboxID string, epoch [16]byte, digest [32]byte) error
 	LoadMAPIUploadProofs(ctx context.Context, mailboxID string, epoch [16]byte, root uint64) ([]UploadProof, error)
 	PublishMAPIUploadProof(ctx context.Context, mailboxID string, epoch [16]byte, proof UploadProof) error
+	BindMAPIPermissionMembers(ctx context.Context, mailboxID string, accounts []string) (map[string]uint64, error)
+	MAPIPermissionMember(ctx context.Context, mailboxID string, id uint64) (string, error)
 }
 
 // Version is an allocation position. Epoch is a GUID in MAPI wire order.
@@ -90,6 +102,7 @@ type Mutation struct {
 	ForgetDrafts         []uint64
 	Spooler              *SpoolerEntry
 	ForgetSpooler        uint64
+	ResolveSpooler       uint64
 	FolderValues         []FolderValue
 	FolderCreation       *FolderCreation
 	ForgetFolderCreation uint64

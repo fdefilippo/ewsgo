@@ -112,6 +112,9 @@ func captureContentsTable(ctx context.Context, session core.Session, binding sto
 			snapshot, err = store.observeDeferredActions(ctx, session, fid)
 		default:
 			snapshot, err = store.observeMailMessages(ctx, session, fid)
+			if _, indexed := session.Mailbox().(core.MailContentIndexer); indexed && errors.Is(err, core.ErrLimit) {
+				snapshot, err = store.observeMailMessageSet(ctx, session, fid, true)
+			}
 			if _, hasReader := session.Mailbox().(core.ContactReader); hasReader && errors.Is(err, normalMetadataOnlyError{}) {
 				contacts, contactErr := store.observeContacts(ctx, session, fid)
 				if !errors.Is(contactErr, core.ErrNotFound) {
@@ -177,6 +180,12 @@ func (table *contentsTable) appendMessageRows(ctx context.Context, binding store
 			putContentsValue(projected.values, 0x0e070003, core.Integer(0))
 			projected.bytes += 512
 			addContentsRowMetadata(&projected, row)
+		} else if row.indexedMIME() {
+			var err error
+			projected, err = indexedContentsPayload(row)
+			if err != nil {
+				return err
+			}
 		} else {
 			change, err := store.projectContentsRow(row)
 			if err != nil {

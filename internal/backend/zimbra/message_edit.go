@@ -131,17 +131,14 @@ func (m *mailbox) AppendMailMessage(ctx context.Context, folder core.ID, mime []
 		return core.Object{}, core.ErrInvalid
 	}
 	if err := m.mailContentFolder(ctx, target.ref); err != nil {
-		return core.Object{}, semanticError(err)
+		return core.Object{}, errors.Join(core.ErrWriteNotDispatched, semanticError(err))
 	}
 	upload, err := m.native.uploadMessageMIME(ctx, mime, "UploadMailMIME", "message.eml")
 	if errors.Is(err, ErrLimit) {
 		return core.Object{}, errors.Join(core.ErrLimit, ErrLimit)
 	}
 	if err != nil {
-		return core.Object{}, semanticError(err)
-	}
-	if err := ctx.Err(); err != nil {
-		return core.Object{}, err
+		return core.Object{}, errors.Join(core.ErrWriteNotDispatched, semanticError(err))
 	}
 	msg := attr(attr(attr(element(mailNS, "m", ""), "l", target.ref), "aid", upload), "noICal", "1")
 	var flags string
@@ -154,7 +151,7 @@ func (m *mailbox) AppendMailMessage(ctx context.Context, folder core.ID, mime []
 	if flags != "" {
 		msg = attr(msg, "f", flags)
 	}
-	response, err := m.native.request(ctx, mailNS, "AddMsg", "",
+	response, err := m.native.requestMutation(ctx, mailNS, "AddMsg", "",
 		attr(element(mailNS, "AddMsgRequest", "", msg), "filterSent", "0"))
 	if err != nil {
 		return core.Object{}, messageWriteError(err)

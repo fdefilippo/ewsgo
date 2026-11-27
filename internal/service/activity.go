@@ -66,6 +66,7 @@ type requestActivity struct {
 	operations      map[string]bool
 	backendFailures int
 	backendFailure  core.ActivityResult
+	sessionEndError core.ActivityResult
 }
 
 func (a *requestActivity) Authenticated(account string) {
@@ -89,6 +90,9 @@ func (a *requestActivity) Record(event core.Activity) {
 		a.backendFailures++
 		if a.backendFailure == core.ActivitySuccess || event.Result >= core.ActivityOutcomeUnknown {
 			a.backendFailure = event.Result
+		}
+		if event.Operation == "EndSession" {
+			a.sessionEndError = event.Result
 		}
 	}
 	// Rebuild the slice so a caller cannot mutate retained data after recording.
@@ -242,6 +246,9 @@ func operationalTrace(logger *slog.Logger, next http.Handler) http.Handler {
 			attrs := []any{"request_id", correlation, "account", account, "protocol", protocol,
 				"method", method, "operation", activity.operation, "completed", completed, "response_write_failed", response.writeFailed, "result", result.String(), "http_status", status,
 				"duration_ms", time.Since(started).Milliseconds(), "operations", operations, "detail_events_dropped", activity.dropped, "backend_failures", activity.backendFailures, "backend_result", activity.backendFailure.String()}
+			if activity.sessionEndError != core.ActivitySuccess {
+				attrs = append(attrs, "session_end_error", activity.sessionEndError.String())
+			}
 			logger.Log(r.Context(), level, "user_operation", attrs...)
 			if logger.Enabled(r.Context(), slog.LevelDebug) {
 				for _, event := range activity.events {

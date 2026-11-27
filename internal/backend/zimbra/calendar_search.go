@@ -33,69 +33,113 @@ func (m *mailbox) readCalendarSearchItems(ctx context.Context, folder core.ID, r
 	if err != nil {
 		return nil, err
 	}
-	if target.itemPrefix == "" {
-		tree, err := m.mailFolderTree(ctx)
-		if err != nil {
-			return nil, folderTreeError(err)
-		}
-		if _, err := tree.specialFolder(role); err != nil {
-			return nil, folderTreeError(err)
-		}
+	if nativeIDFilter != "" && !target.validItem(nativeIDFilter) {
+		return nil, core.ErrNotFound
 	}
-	query := "inid:" + target.searchFolder
-	if nativeIDFilter != "" && target.itemPrefix == "" {
-		query += " item:" + nativeIDFilter
+	personal := target.itemPrefix == ""
+	pointQuery := nativeIDFilter != "" && personal
+	var before core.MailFolderMarker
+	if personal {
+		before, err = m.folderObservationMarker(ctx, target.nativeFolder, role)
+	} else {
+		before, err = m.sharedContentsMarker(ctx, target.nativeFolder, spec.view)
 	}
-	request := element(mailNS, "SearchRequest", "", element(mailNS, "query", query))
-	request = attr(attr(attr(attr(request, "types", spec.view), "limit", strconv.Itoa(core.MaxMailContentMessages+1)),
-		"offset", "0"), "sortBy", "dateDesc")
-	response, err := m.native.request(ctx, mailNS, "Search", "", request)
 	if err != nil {
 		return nil, semanticError(err)
 	}
-	switch response.get("more") {
-	case "0", "false":
-	case "1", "true":
-		return nil, core.ErrLimit
-	default:
-		return nil, ErrProtocol
-	}
-	if response.get("offset") != "0" {
-		return nil, ErrProtocol
-	}
-	if len(response.Children) > core.MaxMailContentMessages {
+	if !pointQuery && before.MessageCount > core.MaxMailContentIndexItems {
 		return nil, core.ErrLimit
 	}
-	seen := make(map[string]bool, len(response.Children))
-	items := make([]core.Object, 0, len(response.Children))
-	for _, child := range response.Children {
-		id := child.get("id")
-		if child.XMLName != (xml.Name{Space: mailNS, Local: hit}) || !target.validItem(id) || seen[id] {
-			return nil, ErrProtocol
-		}
-		if child.get("l") != target.nativeFolder {
-			return nil, core.ErrConflict
-		}
-		seen[id] = true
-		if nativeIDFilter != "" && id != nativeIDFilter {
-			if target.itemPrefix == "" {
-				return nil, ErrProtocol
-			}
-			continue
-		}
-		if !target.canReadAppointment(child.get("class")) {
-			continue
-		}
-		item, err := calendarSearchItem(child, folder, core.ID(prefix+id), role)
+	query := "inid:" + target.searchFolder
+	if pointQuery {
+		query += " item:" + nativeIDFilter
+	}
+	items, count, err := m.scanCalendarSearch(ctx, target, folder, role, spec.view, hit, prefix, query, nativeIDFilter, pointQuery)
+	if err != nil {
+		return nil, err
+	}
+	var after core.MailFolderMarker
+	if personal {
+		after, err = m.folderObservationMarker(ctx, target.nativeFolder, role)
+	} else {
+		after, err = m.sharedContentsMarker(ctx, target.nativeFolder, spec.view)
+	}
+	if err != nil {
+		return nil, semanticError(err)
+	}
+	// A shared Search on Zimbra returns private rows as well. Compare the
+	// raw count with GetFolder before exposing only the authorized entries.
+	if before != after || !pointQuery && count != before.MessageCount {
+		return nil, core.ErrConflict
+	}
+	if !personal {
+		current, err := m.groupwareFolder(ctx, folder, role)
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, item)
+		if target != current {
+			return nil, core.ErrConflict
+		}
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	return items, ctx.Err()
+}
+
+func (m *mailbox) scanCalendarSearch(ctx context.Context, target groupwareTarget, folder core.ID, role core.SpecialFolderKind, view, hit, prefix, query, filter string, point bool) ([]core.Object, uint64, error) {
+	const pageSize = 100
+	count := 0
+	var last uint64
+	var items []core.Object
+	for {
+		offset := strconv.Itoa(count)
+		request := element(mailNS, "SearchRequest", "", element(mailNS, "query", query))
+		request = attr(attr(attr(attr(request, "types", view), "limit", strconv.Itoa(pageSize)), "offset", offset), "sortBy", "idAsc")
+		response, err := m.native.request(ctx, mailNS, "Search", "", request)
+		if err != nil {
+			return nil, 0, semanticError(err)
+		}
+		if response.get("offset") != offset || response.get("sortBy") != "idAsc" || len(response.Children) > pageSize {
+			return nil, 0, ErrProtocol
+		}
+		count += len(response.Children)
+		if count > core.MaxMailContentIndexItems {
+			return nil, 0, core.ErrLimit
+		}
+		for _, child := range response.Children {
+			id := child.get("id")
+			if child.XMLName != (xml.Name{Space: mailNS, Local: hit}) || !target.validItem(id) {
+				return nil, 0, ErrProtocol
+			}
+			number, ok := syncNumber(strings.TrimPrefix(id, target.itemPrefix))
+			if !ok || number <= last || child.get("l") != target.nativeFolder {
+				return nil, 0, core.ErrConflict
+			}
+			last = number
+			if filter != "" && id != filter {
+				if point {
+					return nil, 0, ErrProtocol
+				}
+				continue
+			}
+			if !target.canReadAppointment(child.get("class")) {
+				continue
+			}
+			item, err := calendarSearchItem(child, folder, core.ID(prefix+id), role)
+			if err != nil {
+				return nil, 0, err
+			}
+			items = append(items, item)
+		}
+		switch response.get("more") {
+		case "0", "false":
+			return items, uint64(count), ctx.Err()
+		case "1", "true":
+			if len(response.Children) == 0 || point {
+				return nil, 0, ErrProtocol
+			}
+		default:
+			return nil, 0, ErrProtocol
+		}
 	}
-	return items, nil
 }
 
 func calendarSearchItem(n node, folder, id core.ID, role core.SpecialFolderKind) (core.Object, error) {

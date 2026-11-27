@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -33,7 +35,7 @@ func newContentFixture() *contentFixture {
 func (f *contentFixture) box(t *testing.T) *mailbox {
 	t.Helper()
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			cookie, e := r.Cookie("ZM_AUTH_TOKEN")
 			if e != nil || cookie.Value != fixtureToken {
 				t.Error("missing native cookie")
@@ -43,6 +45,9 @@ func (f *contentFixture) box(t *testing.T) *mailbox {
 			}
 			switch r.URL.Path {
 			case "/service/content/get":
+				if r.Method != http.MethodHead {
+					t.Error("expected HEAD for message metadata")
+				}
 				f.modified++
 				if f.before != nil && f.before(f, w, r, "modified") {
 					return
@@ -560,4 +565,37 @@ func TestMailMessageMIMEVerifiesParentAndContentRevision(t *testing.T) {
 			t.Fatal("oversized envelope was not rejected before MIME access", err)
 		}
 	})
+}
+
+func TestMailContentHEADReusesTLSConnection(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Zimbra-Modified", "1794736800123")
+				w.Header().Set("X-Zimbra-Flags", "u")
+				fmt.Fprint(w, strings.Repeat("message contents", 32768))
+			}, Config{})
+			s := &Session{client: client, token: fixtureToken, expires: time.Now().Add(time.Minute)}
+			connections, requests := 0, 0
+			ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+				requests++
+				if !info.Reused {
+					connections++
+				}
+			}})
+			for range 4 {
+				stamp, flags, err := s.mailContentInfo(ctx, method, url.Values{"id": {"42"}, "sync": {"1"}})
+				if err != nil || stamp.UnixMilli() != 1794736800123 || flags != "u" {
+					t.Fatalf("metadata read = %v, %q, %v", stamp, flags, err)
+				}
+			}
+			want := 1
+			if method == http.MethodGet {
+				want = 4
+			}
+			if connections != want || requests != 4 {
+				t.Fatalf("%d HTTP requests and %d new TLS connections, want 4 and %d", requests, connections, want)
+			}
+		})
+	}
 }

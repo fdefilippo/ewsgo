@@ -82,7 +82,7 @@ Pass `--ca /path/to/issuer.pem` if the client uses a private issuer.
 
 Outlook and MailCraft CLI were tested in defined scenarios. Outlook writes
 to recurring events and Outlook actions on invitations still need
-qualification. Large Zimbra Trash folders containing both mail and
-groupware items can fail to synchronize. Share your client and server
+qualification. One cached Outlook test verified 340 messages in a Zimbra
+Trash folder containing mail, contacts and appointments. Share your client and server
 versions, client mode and a short description of the scenario when
 reporting a result.

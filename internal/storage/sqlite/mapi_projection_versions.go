@@ -40,7 +40,7 @@ func loadMAPIProjection(ctx context.Context, tx *sql.Tx, mailboxID string, highW
 		SELECT counter, COALESCE(parent, 0), change_number, read_number, fingerprint,
 			native_revision, modified, change_key, predecessors, is_present, is_read
 		FROM mapi_projection_versions WHERE mailbox_id = ? ORDER BY counter LIMIT ?
-	`, mailboxID, maxMAPIObjectID+1)
+	`, mailboxID, mapireplica.MaxBindings+1)
 	if err != nil {
 		return nil, fmt.Errorf("read MAPI projection versions: %w", err)
 	}
@@ -64,7 +64,7 @@ func loadMAPIProjection(ctx context.Context, tx *sql.Tx, mailboxID string, highW
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate MAPI projection versions: %w", err)
 	}
-	if len(versions) > maxMAPIObjectID {
+	if len(versions) > mapireplica.MaxBindings {
 		return nil, core.ErrUnsupported
 	}
 	return versions, nil

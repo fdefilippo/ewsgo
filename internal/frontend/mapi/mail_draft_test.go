@@ -303,3 +303,9 @@ func TestObservedDraftAfterLostReplyUsesProvisionalMID(t *testing.T) {
 		t.Fatal("MAPI exposed the private draft reference")
 	}
 }
+
+type existingDraftOnly struct{}
+
+func (existingDraftOnly) CreateMailDraft(context.Context, core.Session, core.ID, string, []byte) (core.Object, error) {
+	return core.Object{}, core.ErrUnsupported
+}

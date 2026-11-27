@@ -6,6 +6,7 @@ package mapi
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -52,6 +53,55 @@ func putContentsValue(values contentsValues, tag uint32, value core.Value) {
 
 func projectMailContents(o core.Object) (projectedMessage, error) {
 	return projectMailContentsAtDepth(o, 0, &mailProjectionBudget{})
+}
+
+const unprojectableMailBody = "Outlook cannot display the original content of this message through EWSGo. To view it, open the message in webmail or an EWS client."
+
+// A format error belongs to this message alone. Keep the same row identity
+// and original MIME. The native envelope can still be rendered, including on
+// a subsequent read after the format becomes supported.
+func projectReadableMailContents(o core.Object) (projectedMessage, error) {
+	// An empty MIME is a missing capture, not an unsupported format.
+	if o.Kind != core.Message || len(o.MIME) == 0 {
+		return projectedMessage{}, core.ErrInvalid
+	}
+	projection, err := projectMailContents(o)
+	if err == nil || !errors.Is(err, core.ErrInvalid) && !errors.Is(err, core.ErrUnsupported) {
+		return projection, err
+	}
+	partial, err := projectMailEnvelope(o)
+	if err != nil {
+		return projectedMessage{}, err
+	}
+	putContentsValue(partial.values, 0x1000001f, core.Text(unprojectableMailBody))
+	putContentsValue(partial.values, messageNativeBody, core.Integer(1))
+	putContentsValue(partial.values, 0x0e1b000b, core.Bool(false))
+	putContentsValue(partial.values, 0x0e070003, core.Integer(mailContentsFlags(o, false)))
+	return partial, nil
+}
+
+func projectMailEnvelope(o core.Object) (projectedMessage, error) {
+	result := projectedMessage{values: contentsValues{}, size: len(o.MIME), bytes: 1024}
+	if err := projectMailContentsMetadata(result.values, o); err != nil {
+		return projectedMessage{}, err
+	}
+	if size, ok := o.Properties[core.MessageSize].(core.Integer); ok && size >= 0 && size <= 1<<31-1 {
+		result.size = int(size)
+	}
+	for _, field := range []struct {
+		key core.Key
+		tag uint32
+	}{
+		{core.Subject, 0x0037001f},
+		{core.MessageID, 0x1035001f},
+		{core.FromAddress, 0x5d02001f},
+	} {
+		if value, ok := o.Properties[field.key].(core.Text); ok && len(value) <= 4096 && validMailText(string(value)) {
+			putContentsValue(result.values, field.tag, value)
+			result.bytes += 2*len(value) + 128
+		}
+	}
+	return result, nil
 }
 
 func projectMailContentsAtDepth(o core.Object, depth int, budget *mailProjectionBudget) (projectedMessage, error) {
@@ -196,10 +246,13 @@ func projectMailFollowUp(values contentsValues, properties core.Properties) {
 	}
 }
 
-func mailContentsFlags(o core.Object, hasAttachments bool) int64 {
-	flags := int64(0)
+func mailContentsFlags(o core.Object, hasAttachments bool) uint32 {
+	var flags uint32
 	if o.Properties[core.IsRead] == core.Bool(true) {
 		flags |= 1
+	}
+	if o.Properties[core.IsDraft] == core.Bool(true) {
+		flags |= 8 // mfUnsent
 	}
 	if hasAttachments {
 		flags |= 0x10

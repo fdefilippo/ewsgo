@@ -14,7 +14,16 @@ import (
 )
 
 func loadMAPISpooler(ctx context.Context, tx *sql.Tx, mailbox string) ([]mapireplica.SpoolerEntry, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT counter, folder, revision, state FROM mapi_spooler WHERE mailbox_id = ? LIMIT ?", mailbox, mapireplica.MaxSpoolerEntries+1)
+	// Earlier versions could leave queue rows after transferring the native
+	// message identity. Completed moves prove which counters were retired.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT q.counter, q.folder, q.revision, q.state
+		FROM mapi_spooler q
+		WHERE q.mailbox_id = ? AND NOT EXISTS (
+			SELECT 1 FROM mapi_message_moves m
+			WHERE m.mailbox_id = q.mailbox_id AND m.source = q.counter AND m.result > 0
+		) LIMIT ?
+	`, mailbox, mapireplica.MaxSpoolerEntries+1)
 	if err != nil {
 		return nil, fmt.Errorf("read MAPI spooler: %w", err)
 	}
@@ -39,6 +48,13 @@ func loadMAPISpooler(ctx context.Context, tx *sql.Tx, mailbox string) ([]mapirep
 }
 
 func writeMAPISpooler(ctx context.Context, tx *sql.Tx, mailbox string, mutation MAPIReplicaMutation) error {
+	if mutation.ResolveSpooler != 0 {
+		if mutation.Spooler != nil || mutation.ForgetSpooler != 0 {
+			return core.ErrInvalid
+		}
+		result, err := tx.ExecContext(ctx, "DELETE FROM mapi_spooler WHERE mailbox_id = ? AND counter = ? AND state = ?", mailbox, mutation.ResolveSpooler, mapireplica.SpoolerDispatching)
+		return spoolerRowsAffected(result, err)
+	}
 	if mutation.ForgetSpooler != 0 {
 		if mutation.Spooler != nil {
 			return core.ErrInvalid
@@ -60,7 +76,9 @@ func writeMAPISpooler(ctx context.Context, tx *sql.Tx, mailbox string, mutation 
 		FROM mapi_object_ids m JOIN mapi_object_ids f ON f.mailbox_id = m.mailbox_id
 		WHERE m.mailbox_id = ? AND m.counter = ? AND m.namespace = ? AND f.counter = ? AND f.namespace = ?
 		  AND (EXISTS (SELECT 1 FROM mapi_spooler q WHERE q.mailbox_id = m.mailbox_id AND q.counter = m.counter)
-		    OR (? = 1 AND (SELECT count(*) FROM mapi_spooler q WHERE q.mailbox_id = m.mailbox_id) < ?))
+		    OR (? = 1 AND (SELECT count(*) FROM mapi_spooler q WHERE q.mailbox_id = m.mailbox_id AND NOT EXISTS (
+				SELECT 1 FROM mapi_message_moves r WHERE r.mailbox_id = q.mailbox_id AND r.source = q.counter AND r.result > 0
+			)) < ?))
 		ON CONFLICT (mailbox_id, counter) DO UPDATE SET state = excluded.state
 		WHERE mapi_spooler.folder = excluded.folder AND mapi_spooler.revision = excluded.revision
 		  AND ((mapi_spooler.state = 1 AND excluded.state = 2)
